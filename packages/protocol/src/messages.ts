@@ -20,6 +20,8 @@ export const sessionMetaSchema = z.object({
   lastText: z.string().optional(),
   model: z.string().optional(),
   effort: effortSchema.optional(),
+  /** Who pays for this chat: 'api' bills the owner's Anthropic API key; unset means the Claude subscription. */
+  billing: z.literal('api').optional(),
   /** The computer this chat works on; unset means the account's active computer. */
   executorId: z.string().optional(),
   /** Project folder on that computer; unset means the folders open in VS Code. */

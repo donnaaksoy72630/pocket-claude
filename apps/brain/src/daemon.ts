@@ -870,6 +870,7 @@ export class Brain {
         ),
       pcFor: (sessionId: string) => this.pcHandle(sessionId),
       chatOnly: (sessionId: string) => this.chatOnly(sessionId),
+      ownerChat: (sessionId: string) => this.isOwner(this.userOfSession(sessionId)),
       userName: (sessionId: string) => this.userName(this.userOfSession(sessionId)),
       emit: (sessionId: string, event: SessionEvent, durable: boolean) => this.emitEvent(sessionId, event, durable),
       metaChanged: (meta: SessionMeta) => {
