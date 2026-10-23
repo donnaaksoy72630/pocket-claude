@@ -408,6 +408,17 @@ describe('model and thinking', () => {
     expect(latest('config').config).toMatchObject({ pending: false, model: { label: 'По умолчанию' }, effort: { label: 'авто' } });
   });
 
+  it('takes picks, messages and chats from the window events', () => {
+    const { model, requests } = setup();
+    model.handle(list(meta('a', 2), meta('b', 1)));
+    model.handle(modelsResult);
+    model.windowEvent({ ev: 'configure', chatId: 'a', model: 'opus' });
+    model.windowEvent({ ev: 'send', chatId: 'a', text: 'hi' });
+    model.windowEvent({ ev: 'open', id: 'b' });
+    model.windowEvent({ ev: 'copied', what: 'code' });
+    expect(requests).toEqual(['history:a', 'configure:a:{"model":"opus"}', 'send:a:hi', 'history:b']);
+  });
+
   it('follows a change made on the phone', () => {
     const { model, latest } = setup();
     model.handle(list(meta('a', 1)));

@@ -122,8 +122,7 @@ const overlay = new OverlayWindow({
   onEvent: (e) => {
     console.log('event', JSON.stringify(e));
     events.push(e);
-    if (e.ev === 'open') model.open(e.id);
-    if (e.ev === 'send') model.send(e.chatId, e.text);
+    model.windowEvent(e);
     if (e.ev === 'theme') model.setTheme(e.theme);
     for (const w of [...waiters]) {
       if (events.length - 1 < w.from || !w.pred(e)) continue;

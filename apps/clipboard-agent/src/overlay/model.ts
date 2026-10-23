@@ -2,6 +2,7 @@ import { applyEvent, buildThread, parseRichMarkdown, type ChatItem, type RichBlo
 import type { InnerMessageBody, ModelInfo, SessionMeta, SessionState } from '@pocket/protocol';
 import { actionTitle, attachmentsAction, groupOf, runState, toolAction, type ActionState, type OverlayAction, type ToolItem } from './actions.js';
 import { applyPatch, chatConfig, configPatch, patchApplied, type ConfigPatch, type OverlayConfig } from './config.js';
+import type { WindowEvent } from './window.js';
 
 export type OverlayTheme = 'dark' | 'light';
 /** idle: done or nothing going on; busy: Claude works; wait: approval needed on the phone; offline: the Mac is gone. */
@@ -148,6 +149,13 @@ export class OverlayModel {
     this.unsent(OFFLINE);
     this.configFailed('Mac не в сети, модель и мышление не изменены');
     this.pushStatus();
+  }
+
+  /** What the window reports that changes the chat: a chat picked, a message written, a model or thinking level picked. */
+  windowEvent(e: WindowEvent): void {
+    if (e.ev === 'open') this.open(e.id);
+    else if (e.ev === 'send') this.send(e.chatId, e.text);
+    else if (e.ev === 'configure') this.configure(e.chatId, { model: e.model, effort: e.effort });
   }
 
   /** The user picked a model or a thinking level for the chat on screen. */
