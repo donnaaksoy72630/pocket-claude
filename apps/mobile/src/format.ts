@@ -52,6 +52,13 @@ const TOOL_ICONS: Record<string, IconName> = {
   TodoWrite: 'checkbox-outline',
   ExitPlanMode: 'map-outline',
   EnterPlanMode: 'map-outline',
+  computer: 'desktop-outline',
+  pc_screenshot: 'camera-outline',
+  pc_clipboard_read: 'clipboard-outline',
+  pc_clipboard_write: 'clipboard-outline',
+  chat_configure: 'options-outline',
+  chat_models: 'options-outline',
+  SandboxNetworkAccess: 'globe-outline',
 };
 
 export function bareToolName(name: string): string {

@@ -43,7 +43,7 @@ import { toDisplayCall } from './claude-tools.js';
 import { ExecutorBridge } from './executor.js';
 import { log } from './log.js';
 import type { PcHandle } from './pc-tools.js';
-import { PermissionBroker } from './permissions.js';
+import { PermissionBroker, SANDBOX_NETWORK_TOOL } from './permissions.js';
 import { Session } from './session.js';
 import { migrateState, OWNER_ID, saveState, type BrainState, type PairedDevice, type UsageTotals, type User } from './store.js';
 
@@ -868,7 +868,12 @@ export class Brain {
       canUseTool: async (sessionId: string, tool: string, input: Record<string, unknown>, signal: AbortSignal) => {
         const shown = toDisplayCall(tool.replace(/^mcp__pocket__/, ''), input);
         // Computer use is asked about once per chat, so the question is about the chat, not this one click.
-        const asked = shown.name === COMPUTER_TOOL ? { description: computerConsent(this.pcHandle(sessionId).name), action: input.action } : shown.input;
+        const asked =
+          shown.name === COMPUTER_TOOL
+            ? { description: computerConsent(this.pcHandle(sessionId).name), action: input.action }
+            : shown.name === SANDBOX_NETWORK_TOOL
+              ? { host: input.host, description: `Let a command in the Mac sandbox reach ${String(input.host)}` }
+              : shown.input;
         const result = await this.permissions.decide(sessionId, shown.name, asked as Record<string, unknown>, signal);
         return result.behavior === 'allow' ? { ...result, updatedInput: input } : result;
       },

@@ -104,6 +104,53 @@ export function computerToolsPrompt(pcName: string | undefined): string {
 
 const SETTLE_MS = { pointer: 300, click: 600, keys: 500, window: 800, open: 1500 };
 
+const short = (s: string, max = 60) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+const pt = (c: unknown) => (Array.isArray(c) && c.length === 2 ? `[${c.map((n) => Math.round(Number(n))).join(', ')}]` : '');
+
+/** One line for the chat, the activity screen and a call: what this step does, e.g. "left click at [640, 360]". */
+export function describeComputerStep(input: Record<string, unknown>): string {
+  const a = String(input.action ?? '');
+  const text = typeof input.text === 'string' ? input.text.replace(/\s+/g, ' ') : '';
+  const at = input.coordinate ? ` at ${pt(input.coordinate)}` : '';
+  switch (a) {
+    case 'left_click':
+    case 'right_click':
+    case 'middle_click':
+    case 'double_click':
+    case 'triple_click':
+      return `${a.replace('_', ' ')}${at}${text ? ` with ${text}` : ''}`;
+    case 'mouse_move':
+      return `move the pointer${at.replace(' at', ' to')}`;
+    case 'left_click_drag':
+      return `drag ${pt(input.start_coordinate)} → ${pt(input.coordinate)}`;
+    case 'left_mouse_down':
+    case 'left_mouse_up':
+      return `${a === 'left_mouse_down' ? 'press' : 'release'} the left button${at}`;
+    case 'scroll':
+      return `scroll ${input.scroll_direction ?? 'down'} ${input.scroll_amount ?? 3}${at}`;
+    case 'type':
+      return `type "${short(text)}"`;
+    case 'key':
+      return `press ${text}`;
+    case 'hold_key':
+      return `hold ${text} for ${input.duration ?? 1} s`;
+    case 'wait':
+      return `wait ${input.duration ?? 1} s`;
+    case 'zoom':
+      return `zoom in on ${Array.isArray(input.region) ? `[${input.region.join(', ')}]` : 'a region'}`;
+    case 'cursor_position':
+      return 'where is the pointer';
+    case 'list_windows':
+      return 'list windows';
+    case 'open':
+      return `open ${short(`${input.target ?? ''}${input.args ? ` ${input.args}` : ''}`)}`;
+    case 'switch_display':
+      return `look at display ${input.display ?? 0}`;
+    default:
+      return a.endsWith('_window') ? `${a.replace('_window', '')} window "${short(String(input.window ?? ''), 40)}"` : a;
+  }
+}
+
 /** Consent text shown on the phone (and read out on a call) the first time a chat wants the computer. */
 export function computerConsent(pcName: string | undefined): string {
   return `Control ${pcName ? `"${pcName}"` : 'your computer'} in this chat: see the screen, use the mouse and keyboard, open and close windows`;

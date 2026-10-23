@@ -71,6 +71,12 @@ const fail = (text: string): Result => ({ content: [{ type: 'text', text }], isE
 const modelList = (models: readonly ModelInfo[]) =>
   models.map((m) => `- ${m.displayName} (${m.value}): ${m.description}${m.efforts?.length ? `. Thinking: ${m.efforts.join(', ')}` : ''}`).join('\n');
 
+/** One line for the chat: "model → fable, thinking → max". */
+export function describeChatChange(input: Record<string, unknown>): string {
+  const parts = [typeof input.model === 'string' ? `model → ${input.model}` : '', typeof input.effort === 'string' ? `thinking → ${input.effort}` : ''];
+  return parts.filter(Boolean).join(', ') || 'no change';
+}
+
 /** What Claude is told about switching its own model, in every mode. */
 export function chatToolsPrompt(): string {
   return [

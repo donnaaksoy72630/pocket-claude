@@ -2,6 +2,8 @@ import { readFile } from 'node:fs/promises';
 import { isAbsolute, relative, resolve } from 'node:path';
 import { z } from 'zod';
 import { MCP_SERVER_NAME, toolArgs, toolDescriptions, type ToolName } from '@pocket/protocol';
+import { describeChatChange } from './chat-tools.js';
+import { COMPUTER_TOOL, describeComputerStep } from './computer-tools.js';
 
 /**
  * Claude Code-shaped tools that run on the executor.
@@ -164,6 +166,9 @@ export const AUTO_ALLOWED_TOOLS = [
 
 /** Maps a Claude-facing tool use to what clients display and permissions check. Unknown names pass through. */
 export function toDisplayCall(name: string, input: unknown): { name: string; input: unknown } {
+  const described = typeof input === 'object' && input !== null ? (input as Record<string, unknown>) : undefined;
+  if (described && name === COMPUTER_TOOL) return { name, input: { ...described, description: describeComputerStep(described) } };
+  if (described && name === 'chat_configure') return { name, input: { ...described, description: describeChatChange(described) } };
   const t = byName.get(name);
   if (!t || typeof input !== 'object' || input === null) return { name, input };
   const call = t.toProtocol(input as Record<string, unknown>);

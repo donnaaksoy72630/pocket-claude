@@ -1,6 +1,7 @@
 import type { ComputerAction, ComputerResult, Display, WindowInfo } from '@pocket/protocol';
 import { describe, expect, it } from 'vitest';
-import { computerConsent, computerTools, computerToolsPrompt, ComputerState, formatWindows, fromDesktop, pickWindow, toDesktop, type ScreenView } from '../src/computer-tools.js';
+import { computerConsent, computerTools, computerToolsPrompt, ComputerState, describeComputerStep, formatWindows, fromDesktop, pickWindow, toDesktop, type ScreenView } from '../src/computer-tools.js';
+import { toDisplayCall } from '../src/claude-tools.js';
 import type { PcHandle } from '../src/pc-tools.js';
 
 const DISPLAYS: Display[] = [
@@ -212,5 +213,23 @@ describe('computer helpers', () => {
     expect(computerConsent('Laptop')).toMatch(/^Control "Laptop" in this chat: see the screen/);
     expect(computerToolsPrompt('Laptop')).toMatch(/mcp__pocket__computer lets you see and operate "Laptop"/);
     expect(computerToolsPrompt(undefined)).toMatch(/Ask the user first before anything hard to undo/);
+  });
+});
+
+describe('computer steps as the user sees them', () => {
+  it('read as short lines in the chat, the activity screen and on a call', () => {
+    expect(describeComputerStep({ action: 'left_click', coordinate: [640.4, 360] })).toBe('left click at [640, 360]');
+    expect(describeComputerStep({ action: 'double_click', coordinate: [1, 2], text: 'ctrl' })).toBe('double click at [1, 2] with ctrl');
+    expect(describeComputerStep({ action: 'type', text: 'Get-ChildItem\n' })).toBe('type "Get-ChildItem "');
+    expect(describeComputerStep({ action: 'key', text: 'ctrl+s' })).toBe('press ctrl+s');
+    expect(describeComputerStep({ action: 'left_click_drag', start_coordinate: [1, 2], coordinate: [3, 4] })).toBe('drag [1, 2] → [3, 4]');
+    expect(describeComputerStep({ action: 'open', target: 'chrome', args: 'https://example.com' })).toBe('open chrome https://example.com');
+    expect(describeComputerStep({ action: 'focus_window', window: 'PowerShell' })).toBe('focus window "PowerShell"');
+    expect(describeComputerStep({ action: 'screenshot' })).toBe('screenshot');
+  });
+
+  it('reach every client through the displayed tool call', () => {
+    expect(toDisplayCall('computer', { action: 'scroll', scroll_direction: 'up' })).toEqual({ name: 'computer', input: { action: 'scroll', scroll_direction: 'up', description: 'scroll up 3' } });
+    expect(toDisplayCall('chat_configure', { model: 'fable', effort: 'max' }).input).toMatchObject({ description: 'model → fable, thinking → max' });
   });
 });
