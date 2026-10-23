@@ -35,6 +35,7 @@ import {
 import { DeviceLink, type IncomingMessage, type WebSocketCtor } from '@pocket/transport';
 import { WebSocket as NodeWebSocket } from 'ws';
 import { isAllowedByRules, validateRule } from './allowlist.js';
+import { FALLBACK_MODELS } from './chat-tools.js';
 import { toDisplayCall } from './claude-tools.js';
 import { ExecutorBridge } from './executor.js';
 import { log } from './log.js';
@@ -45,12 +46,6 @@ import { migrateState, OWNER_ID, saveState, type BrainState, type PairedDevice, 
 
 const MAX_LIVE_SESSIONS = 2;
 
-const FALLBACK_MODELS: ModelInfo[] = [
-  { value: 'default', displayName: 'Default', description: 'Claude Code default for your plan' },
-  { value: 'opus', displayName: 'Opus', description: 'Most capable for complex work', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  { value: 'sonnet', displayName: 'Sonnet', description: 'Fast and capable for everyday tasks', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-  { value: 'haiku', displayName: 'Haiku', description: 'Fastest for quick answers', efforts: ['low', 'medium', 'high', 'xhigh', 'max'] },
-];
 const DELTA_FLUSH_MS = 60;
 const CLIPBOARD_TIMEOUT_MS = 60_000;
 

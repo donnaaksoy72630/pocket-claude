@@ -19,8 +19,8 @@
 
 | Час | Этап | Что будет готово | Коммит |
 |---|---|---|---|
-| 0 | План | Изучение кода, этот файл | `plan: wave 3` |
-| 1 | 1. Модель и мышление голосом | Инструменты `chat_models` и `chat_configure`, Fable в списках, подсказки для чата и звонка, тесты | `brain: Claude switches its own model and effort` |
+| 0 | ✅ План | Изучение кода, этот файл | `plan: wave 3` |
+| 1 | ✅ 1. Модель и мышление голосом | Инструменты `chat_models` и `chat_configure`, Fable в списках, подсказки для чата и звонка, тесты | `brain: Claude switches its own model and effort` |
 | 2 | 2. Песочница чата на Mac | Папка на чат, память `NOTES.md`, вложения в папке чата, Seatbelt-песочница для Bash, разрешения на сеть по хостам, тесты | `brain: a sandbox folder per Mac chat` |
 | 3 | 3а. PocketClipboard: руки | Протокол `computer.act`/`computer.done`, PowerShell + C# хост: экран, мышь, клавиатура, окна, запуск программ; проверка синтаксиса через pwsh | `clipboard-agent: computer control host` |
 | 4 | 3б. Brain: инструмент `computer` | Инструмент в формате computer use, пересчёт координат, авто-скриншот после действия, одно разрешение на чат, подсказки, стоп, тесты | `brain: computer use tool` |
@@ -30,7 +30,7 @@
 
 ## Этапы
 
-### Этап 1 — Claude сам меняет модель и мышление (`apps/brain`)
+### ✅ Этап 1 — Claude сам меняет модель и мышление (`apps/brain`)
 
 - Новый модуль `chat-tools.ts`: MCP-инструменты на сервере `pocket` во всех трёх режимах (Mac, удалённый Windows, чат без файлов):
   - `chat_models` — текущая модель и уровень мышления, плюс доступные модели с их уровнями (из `supportedModels()` живого Claude Code, иначе запасной список);

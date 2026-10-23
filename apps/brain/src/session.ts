@@ -25,6 +25,7 @@ import {
   type SessionState,
   type Subagent,
 } from '@pocket/protocol';
+import { CHAT_ALLOWED_TOOLS, chatTools, chatToolsPrompt, FALLBACK_MODELS, type ChatControl } from './chat-tools.js';
 import { agentDefinitions, AUTO_ALLOWED_TOOLS, BUILTIN_TOOLS, CLAUDE_TOOLS, claudeTool, readLocalSkillFile, toDisplayCall, TOOL_ALIASES } from './claude-tools.js';
 import type { ExecutorHandle } from './executor.js';
 import { log } from './log.js';
@@ -61,6 +62,7 @@ export const VOICE_NOTE = [
   'Only that part is read aloud. If details help (code, commands, tables, steps), put them after a line with only --- on it: the phone stops reading there and they stay in the chat. Then say so in the spoken part, for example that the code is in the chat.',
   'If they ask for a command, code or any text to paste, put the exact text on their computer with pc_clipboard_write and say it is on the clipboard, ready for Ctrl+V.',
   'If they ask to look at the screen, take a screenshot with pc_screenshot and tell them what matters. If they ask what they copied, read it with pc_clipboard_read and summarise it.',
+  'If they ask to switch the model or how hard you think, do it with chat_configure and say in one sentence what changed.',
   'Before a tool that takes a while, say one short sentence about what you are doing, so the line is not silent.',
   'Do not read out file paths, URLs, hashes or long numbers: describe them in words.',
   'After any action, say in one sentence what you did and what you saw.]',
@@ -85,6 +87,7 @@ function macSystemPrompt(cwd: string, projectInstructions: string | null, pcName
     'The user chats from a phone. Keep replies short and lead with the outcome; they can copy any reply or code block to their Windows laptop clipboard with one tap, so put things meant for pasting into a single code block.',
     'Files the user attaches (often straight from their Windows clipboard) are saved on this Mac; their paths are listed in the message. Read them from there.',
     pcToolsPrompt(pcName),
+    chatToolsPrompt(),
     projectInstructions ? `# Project instructions (CLAUDE.md)\n${projectInstructions}` : '',
   ]
     .filter(Boolean)
@@ -97,12 +100,13 @@ function chatSystemPrompt(userName: string, pcName: string | undefined): string 
     `You are talking to ${userName} from their phone or Telegram. There is no project here and you have no file or shell access anywhere: never try to read, write or run anything. Your working directory is an empty scratch folder; ignore it.`,
     'Answer questions, write code and commands in the chat. Anything meant for pasting goes in one code block, because the user copies a block with one tap. Keep replies short and lead with the outcome, in the user\'s language.',
     pcToolsPrompt(pcName),
+    chatToolsPrompt(),
   ].join('\n\n');
 }
 
 /** Built-ins that need a terminal UI or act outside the chat. */
 const MAC_DISALLOWED = ['AskUserQuestion', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger', 'PushNotification', 'SendUserFile', 'Workflow'];
-const MAC_AUTO_ALLOWED = ['Read', 'Glob', 'Grep', 'LS', 'NotebookRead', ...BUILTIN_TOOLS.filter((t) => t !== 'ExitPlanMode'), ...PC_ALLOWED_TOOLS];
+const MAC_AUTO_ALLOWED = ['Read', 'Glob', 'Grep', 'LS', 'NotebookRead', ...BUILTIN_TOOLS.filter((t) => t !== 'ExitPlanMode'), ...PC_ALLOWED_TOOLS, ...CHAT_ALLOWED_TOOLS];
 const CHAT_BUILTIN_TOOLS = ['WebFetch', 'WebSearch'];
 
 const MCP_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
@@ -131,6 +135,7 @@ function systemPromptFor(workspaces: string[], projectInstructions: string | nul
     'Bash runs Windows PowerShell, not a POSIX shell: use PowerShell syntax and Windows paths. Use run_in_background for servers and watchers. Read a file before editing it.',
     'The user is chatting from a phone or a small VS Code panel: keep replies short and lead with the outcome.',
     pcToolsPrompt(pcName),
+    chatToolsPrompt(),
     projectInstructions ? `# Project instructions (CLAUDE.md on the Windows workspace)\n${projectInstructions}` : '',
   ]
     .filter(Boolean)
@@ -186,6 +191,8 @@ export class Session {
   /** Computer the running Claude Code process was started for; its prompt names that computer's folders. */
   private startedOn: string | undefined;
   private restartAfterTurn = false;
+  /** Model/effort Claude switched to from inside a turn; the live process takes it when the turn ends. */
+  private pendingConfig: { model?: string | null; effort?: Effort | null } | null = null;
   /** Deleted chats must not resurface through late state updates from a stopping process. */
   private destroyed = false;
   private streamedText = false;
@@ -243,6 +250,26 @@ export class Session {
       log(`live configure failed for ${this.id}, restarting on next message: ${String(e)}`);
       this.stop();
     }
+  }
+
+  /**
+   * A change Claude asked for itself (chat_configure). The chat shows it at once; the live process takes it when the
+   * turn is over, so the model never changes halfway through a tool loop.
+   */
+  configureAfterTurn(patch: { model?: string | null; effort?: Effort | null }): void {
+    const next: Partial<SessionMeta> = {};
+    if (patch.model !== undefined) next.model = patch.model ?? undefined;
+    if (patch.effort !== undefined) next.effort = patch.effort ?? undefined;
+    this.setMeta(next);
+    if (!this.q) return;
+    this.pendingConfig = { ...this.pendingConfig, ...patch };
+    if (this.meta.state === 'idle' && this.running.size === 0) this.applyPendingConfig();
+  }
+
+  private applyPendingConfig(): void {
+    const patch = this.pendingConfig;
+    this.pendingConfig = null;
+    if (patch) void this.configure(patch);
   }
 
   /** Moves the chat to another computer. The process restarts so Claude sees that computer's folders and CLAUDE.md. */
@@ -367,6 +394,7 @@ export class Session {
 
   stop(): void {
     this.restartAfterTurn = false;
+    this.pendingConfig = null;
     this.agents.clear();
     this.input?.end();
     this.abort?.abort();
@@ -439,7 +467,7 @@ export class Session {
         tools: CHAT_BUILTIN_TOOLS,
         mcpServers: { [MCP_SERVER_NAME]: this.pcServer() },
         strictMcpConfig: true,
-        allowedTools: [...CHAT_BUILTIN_TOOLS, ...PC_ALLOWED_TOOLS],
+        allowedTools: [...CHAT_BUILTIN_TOOLS, ...PC_ALLOWED_TOOLS, ...CHAT_ALLOWED_TOOLS],
         systemPrompt: { type: 'preset', preset: 'claude_code', append: chatSystemPrompt(this.host.userName(this.id), pcName) },
       };
     } else if (executor.id === undefined) {
@@ -466,7 +494,7 @@ export class Session {
         toolAliases: TOOL_ALIASES,
         mcpServers: { [MCP_SERVER_NAME]: this.mcpServer() },
         strictMcpConfig: true,
-        allowedTools: [...AUTO_ALLOWED_TOOLS, ...PC_ALLOWED_TOOLS],
+        allowedTools: [...AUTO_ALLOWED_TOOLS, ...PC_ALLOWED_TOOLS, ...CHAT_ALLOWED_TOOLS],
         agents: agentDefinitions(remoteWorkspaceBlock(roots)),
         systemPrompt: { type: 'preset', preset: 'claude_code', append: systemPromptFor(roots, projectInstructions, pcName) },
       };
@@ -504,9 +532,20 @@ export class Session {
     return DEFAULT_MAC_WORKSPACE;
   }
 
-  /** Only the pc_* tools: what Mac and chat-only sessions get. */
+  /** The pc_* and chat_* tools: what Mac and chat-only sessions get. */
   private pcServer() {
-    return createSdkMcpServer({ name: MCP_SERVER_NAME, version: '0.1.0', alwaysLoad: true, tools: pcTools(() => this.host.pcFor(this.id)) });
+    return createSdkMcpServer({ name: MCP_SERVER_NAME, version: '0.1.0', alwaysLoad: true, tools: [...pcTools(() => this.host.pcFor(this.id)), ...chatTools(() => this.chatControl())] });
+  }
+
+  private chatControl(): ChatControl {
+    return {
+      current: () => ({ ...(this.meta.model ? { model: this.meta.model } : {}), ...(this.meta.effort ? { effort: this.meta.effort } : {}) }),
+      models: async () => {
+        const live = await this.supportedModels().catch(() => null);
+        return live?.length ? live : FALLBACK_MODELS;
+      },
+      configure: (patch) => this.configureAfterTurn(patch),
+    };
   }
 
   private mcpServer() {
@@ -517,7 +556,7 @@ export class Session {
       name: MCP_SERVER_NAME,
       version: '0.1.0',
       alwaysLoad: true,
-      tools: [...pcTools(() => this.host.pcFor(this.id)), ...CLAUDE_TOOLS.map((t) =>
+      tools: [...pcTools(() => this.host.pcFor(this.id)), ...chatTools(() => this.chatControl()), ...CLAUDE_TOOLS.map((t) =>
         tool(t.name, t.description, t.shape, async (args) => {
           const toolUseId = this.pendingToolUseIds.get(t.name)?.shift();
           const input = unscratchPaths(args as Record<string, unknown>, scratch);
@@ -694,6 +733,7 @@ export class Session {
           this.stop();
           return;
         }
+        this.applyPendingConfig();
         this.touch();
         return;
       }
