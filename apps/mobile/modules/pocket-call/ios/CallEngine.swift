@@ -350,6 +350,11 @@ final class CallEngine: NSObject {
 
   private func configurationChanged(_ generation: Int) {
     guard running, !held, generation == engineGeneration else { return }
+    // Turning voice processing on can post one of these for an engine that keeps running.
+    if engine?.isRunning == true {
+      reportRoute()
+      return
+    }
     scheduleRestart("audio configuration changed")
   }
 
