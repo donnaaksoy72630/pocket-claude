@@ -73,7 +73,7 @@ describe('JsSpeechEngine (Android and iPhones without the native engine)', () =>
     expect(recognition.start).toHaveBeenCalledTimes(1);
     const waits = [500, 1000, 2000, 4000, 8000, 8000];
     waits.forEach((wait, i) => {
-      listeners.start!({});
+      listeners.start?.({});
       listeners.end!({});
       vi.advanceTimersByTime(wait - 1);
       expect(recognition.start).toHaveBeenCalledTimes(i + 1);
@@ -83,7 +83,7 @@ describe('JsSpeechEngine (Android and iPhones without the native engine)', () =>
     expect(events.filter((e) => e.type === 'error')).toEqual([expect.objectContaining({ code: 'recognition', fatal: false })]);
 
     // A session that ran for a while ends the usual way: listening resumes at once and the count starts over.
-    listeners.start!({});
+    listeners.start?.({});
     vi.advanceTimersByTime(5000);
     listeners.end!({});
     vi.advanceTimersByTime(0);
@@ -96,7 +96,7 @@ describe('JsSpeechEngine (Android and iPhones without the native engine)', () =>
     engine.subscribe((e) => events.push(e));
     await engine.start(OPTIONS);
     engine.setMode('listen');
-    listeners.start!({});
+    listeners.start?.({});
     listeners.result!({ isFinal: true, results: [{ transcript: 'привет' }] });
     vi.advanceTimersByTime(150);
     expect(events.filter((e) => e.type === 'final')).toEqual([{ type: 'final', text: 'привет' }]);
@@ -105,7 +105,7 @@ describe('JsSpeechEngine (Android and iPhones without the native engine)', () =>
     // The aborted session reports its end only now, after the next one was asked to start.
     listeners.error!({ error: 'aborted', message: 'Speech recognition aborted.' });
     listeners.end!({});
-    listeners.start!({});
+    listeners.start?.({});
     vi.advanceTimersByTime(20_000);
     expect(recognition.start).toHaveBeenCalledTimes(2);
     expect(events.filter((e) => e.type === 'error' || e.type === 'recognitionError')).toEqual([]);
@@ -113,6 +113,34 @@ describe('JsSpeechEngine (Android and iPhones without the native engine)', () =>
     listeners.result!({ isFinal: true, results: [{ transcript: 'как дела' }] });
     vi.advanceTimersByTime(150);
     expect(events.filter((e) => e.type === 'final').at(-1)).toEqual({ type: 'final', text: 'как дела' });
+  });
+
+  it('ignores the end of an aborted session that arrives after the next one started (iOS)', async () => {
+    const engine = new JsSpeechEngine();
+    const events: EngineEvent[] = [];
+    engine.subscribe((e) => events.push(e));
+    await engine.start(OPTIONS);
+    engine.setMode('listen');
+    listeners.result!({ isFinal: true, results: [{ transcript: 'привет' }] });
+    vi.advanceTimersByTime(150);
+    expect(recognition.start).toHaveBeenCalledTimes(2);
+    listeners.error!({ error: 'aborted', message: 'Speech recognition aborted.' });
+    listeners.start?.({});
+    listeners.end!({});
+    vi.advanceTimersByTime(20_000);
+    expect(recognition.start).toHaveBeenCalledTimes(2);
+    expect(events.filter((e) => e.type === 'error')).toEqual([]);
+    // The session that is running is still heard, and its own end restarts listening at once.
+    listeners.result!({ isFinal: true, results: [{ transcript: 'как дела' }] });
+    vi.advanceTimersByTime(150);
+    expect(events.filter((e) => e.type === 'final').at(-1)).toEqual({ type: 'final', text: 'как дела' });
+    expect(recognition.start).toHaveBeenCalledTimes(3);
+    listeners.error!({ error: 'aborted', message: 'Speech recognition aborted.' });
+    listeners.end!({});
+    vi.advanceTimersByTime(3000);
+    listeners.end!({});
+    vi.advanceTimersByTime(0);
+    expect(recognition.start).toHaveBeenCalledTimes(4);
   });
 
   it('turns the microphone off while it talks, at the normal rate, with the best voice', async () => {

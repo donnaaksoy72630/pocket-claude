@@ -110,10 +110,11 @@ export class JsSpeechEngine implements SpeechEngine {
   /** Sessions that ended right after starting in a row; restarting them at once spins the CPU. */
   private quickEnds = 0;
   private startedAt = 0;
-  /** We aborted the running session: its `end` is ours, not the platform giving up. */
-  private aborting = false;
-  /** A session was asked to start and has not said so yet: an `end` now belongs to the one before it. */
-  private starting = false;
+  /**
+   * Sessions we aborted whose `end` has not arrived yet. Every abort brings exactly one `end` of its own, on Android
+   * before the next session's `start`, on iOS possibly after it: counting them works in either order.
+   */
+  private abortedEnds = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private lastError: string | null = null;
   private queue: { id: string; text: string }[] = [];
@@ -125,22 +126,16 @@ export class JsSpeechEngine implements SpeechEngine {
     if (!allowed.granted) throw new EngineError('permission', 'Microphone or speech recognition is off: allow both for Pocket in the phone settings.');
     this.subs.push(
       ExpoSpeechRecognitionModule.addListener('result', (e: ExpoSpeechRecognitionResultEvent) => this.onResult(e)),
-      ExpoSpeechRecognitionModule.addListener('start', () => {
-        this.starting = false;
-        this.aborting = false;
-      }),
       ExpoSpeechRecognitionModule.addListener('error', (e) => {
-        // The new session failed to start: the end that follows is its own.
-        if (e.error !== 'aborted') this.starting = false;
         if (e.error === 'no-speech' || e.error === 'aborted') return;
         this.lastError = e.message || e.error;
         if (this.quickEnds === 0) this.emit({ type: 'recognitionError', code: e.error, message: e.message || e.error });
       }),
       ExpoSpeechRecognitionModule.addListener('end', () => {
-        // The end of a session we aborted arrives after the next one may have started: whoever aborted it decides
-        // what comes next, and it must not stop the new session or count as the recognizer giving up.
-        if (this.aborting || this.starting) {
-          this.aborting = false;
+        // The end of a session we aborted may arrive after the next one started: whoever aborted it decides what
+        // comes next, and it must not stop the new session or count as the recognizer giving up.
+        if (this.abortedEnds > 0) {
+          this.abortedEnds--;
           return;
         }
         // The platform ends sessions on its own (iOS after about a minute): keep listening. A session that ends
@@ -249,7 +244,6 @@ export class JsSpeechEngine implements SpeechEngine {
   private listen(): void {
     if (!this.options) return;
     this.recognizing = true;
-    this.starting = true;
     this.startedAt = Date.now();
     this.heard = '';
     try {
@@ -265,7 +259,6 @@ export class JsSpeechEngine implements SpeechEngine {
       this.emit({ type: 'capture', active: true });
     } catch (e) {
       this.recognizing = false;
-      this.starting = false;
       this.emit({ type: 'error', code: 'recognition', message: e instanceof Error ? e.message : String(e), fatal: false });
     }
   }
@@ -275,11 +268,11 @@ export class JsSpeechEngine implements SpeechEngine {
     this.timer = null;
     if (!this.recognizing) return;
     this.recognizing = false;
-    this.aborting = true;
+    this.abortedEnds++;
     try {
       ExpoSpeechRecognitionModule.abort();
     } catch {
-      this.aborting = false;
+      this.abortedEnds--;
     }
   }
 
