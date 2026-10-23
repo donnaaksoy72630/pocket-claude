@@ -336,7 +336,7 @@ export const innerMessageBodySchema = z.discriminatedUnion('type', [
     projects: z.array(projectSchema).optional(),
     /**
      * What this computer offers: 'tools' (VS Code extension), 'clipboard' (PocketClipboard), 'screenshot' (PocketClipboard answers screen.capture),
-     * 'overlay' (PocketClipboard shows the chat on screen: it receives session events and may list sessions and read history),
+     * 'overlay' (PocketClipboard shows the chat on screen: it receives session events, may list sessions, read history and write text into its person's chats),
      * 'computer' (PocketClipboard answers computer.act: screen, mouse, keyboard, windows).
      */
     capabilities: z.array(z.string()).optional(),

@@ -7,6 +7,10 @@ export type WindowEvent =
   | { ev: 'visible'; visible: boolean }
   | { ev: 'copied'; what: string }
   | { ev: 'theme'; theme: OverlayTheme }
+  /** A chat was picked in the window's side list. */
+  | { ev: 'open'; id: string }
+  /** The user wrote a message to the chat on screen. */
+  | { ev: 'send'; chatId: string; text: string }
   | { ev: 'error'; message: string };
 
 export interface OverlayWindowOptions {

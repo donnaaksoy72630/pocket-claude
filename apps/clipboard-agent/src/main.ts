@@ -11,7 +11,7 @@ import { ClipboardAgent, type AgentState } from './agent.js';
 import { macClipboard, windowsClipboard } from './clipboard.js';
 import { COMPUTER_PS, ComputerHost } from './computer.js';
 import { OverlayModel } from './overlay/model.js';
-import { OVERLAY_PS } from './overlay/script.js';
+import { OVERLAY_PS_FILE } from './overlay/script.js';
 import { OverlayWindow } from './overlay/window.js';
 import { windowsScreen } from './screenshot.js';
 
@@ -126,13 +126,15 @@ async function run(): Promise<void> {
   let overlay: { model: OverlayModel; window: OverlayWindow } | undefined;
   const startOverlay = () => {
     if (overlay || !win) return;
-    writeFileSync(files.overlay, OVERLAY_PS);
+    writeFileSync(files.overlay, OVERLAY_PS_FILE);
     const model = new OverlayModel({ window: (op) => void overlay?.window.send(op), request: (body) => agent?.request(body) }, state.overlayTheme);
     const window = new OverlayWindow({
       script: files.overlay,
       snapshot: () => model.snapshot(),
       log,
       onEvent: (e) => {
+        if (e.ev === 'open') return model.open(e.id);
+        if (e.ev === 'send') return model.send(e.chatId, e.text);
         if (e.ev !== 'theme' || e.theme === state.overlayTheme) return;
         state.overlayTheme = e.theme;
         saveState(state);
@@ -172,7 +174,7 @@ async function run(): Promise<void> {
     process.exit(0);
   });
   server.listen(pipe, () => {
-    if (win) {
+    if (win && state.computer) {
       writeFileSync(files.computer, COMPUTER_PS);
       computer = new ComputerHost({ script: files.computer, log });
     }
@@ -317,8 +319,21 @@ async function main(): Promise<void> {
       console.log(`Overlay ${on}.${applied ? '' : ' Applies when the agent starts.'}`);
       return;
     }
+    case 'computer': {
+      const on = args()[1];
+      if (on !== 'on' && on !== 'off') return console.log('Usage: PocketClipboard.exe computer on|off');
+      // A running agent saves its state on exit, so it stops before the switch is written and starts again after.
+      const wasRunning = (await control('quit')) !== undefined;
+      const state = loadState();
+      if (!state) return console.log('Not paired.');
+      state.computer = on === 'on';
+      saveState(state);
+      if (wasRunning) startHidden();
+      console.log(on === 'on' ? 'Computer use on: Claude may use the mouse, keyboard and windows here after you allow it on the phone.' : 'Computer use off.');
+      return;
+    }
     default:
-      console.log('Usage: PocketClipboard.exe [install | pair | run | status | stop | uninstall | overlay on|off]');
+      console.log('Usage: PocketClipboard.exe [install | pair | run | status | stop | uninstall | overlay on|off | computer on|off]');
   }
 }
 

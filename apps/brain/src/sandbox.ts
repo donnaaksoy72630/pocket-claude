@@ -56,15 +56,18 @@ export function macWorkspaceFor(meta: SessionMeta): { cwd: string; own: boolean 
   return { cwd: chatFolder(meta), own: true };
 }
 
-/** Seatbelt sandbox for the shell commands of Mac chats; `POCKET_SANDBOX=off` turns it off. */
-export function macSandbox(env: NodeJS.ProcessEnv = process.env): Options['sandbox'] | undefined {
+/**
+ * Seatbelt sandbox for the shell commands of Mac chats; `POCKET_SANDBOX=off` turns it off. Commands skip the prompt only
+ * in the chat's own folder: in a picked project the sandbox may write to its sources, which later run outside it.
+ */
+export function macSandbox(env: NodeJS.ProcessEnv = process.env, opts: { autoAllow?: boolean } = {}): Options['sandbox'] | undefined {
   if (/^(off|0|false|no)$/i.test(env.POCKET_SANDBOX ?? '')) return undefined;
   const extra = (env.POCKET_SANDBOX_DOMAINS ?? '').split(/[\s,]+/).filter(Boolean);
   return {
     enabled: true,
     // Without Seatbelt (not macOS, broken install) commands run as before, with a permission prompt each.
     failIfUnavailable: false,
-    autoAllowBashIfSandboxed: true,
+    autoAllowBashIfSandboxed: opts.autoAllow ?? true,
     allowUnsandboxedCommands: true,
     network: { allowedDomains: [...SANDBOX_DOMAINS, ...extra], allowLocalBinding: true },
   };
@@ -72,7 +75,7 @@ export function macSandbox(env: NodeJS.ProcessEnv = process.env): Options['sandb
 
 export const SANDBOX_PROMPT = [
   '# Sandbox',
-  'Shell commands run in a macOS sandbox and need no approval: they may write only inside your working directory and temp folders, and reach the network through a proxy where code hosts and package registries are open; any other host is asked on the user\'s phone.',
+  'Shell commands run in a macOS sandbox (no approval needed in a chat folder under chats/; in a picked project or the shared workspace the user approves each command): they may write only inside your working directory and temp folders, and reach the network through a proxy where code hosts and package registries are open; any other host is asked on the user\'s phone.',
   'If a command really has to go outside (install something system-wide, change files elsewhere), rerun it with dangerouslyDisableSandbox: the user is asked first, so say why in one sentence.',
 ].join('\n');
 

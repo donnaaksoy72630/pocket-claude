@@ -488,14 +488,14 @@ export class Session {
       const place = macWorkspaceFor(this.meta);
       cwd = place.cwd;
       mkdirSync(cwd, { recursive: true });
-      const sandbox = macSandbox();
+      const sandbox = macSandbox(process.env, { autoAllow: place.own });
       specific = {
         tools: { type: 'preset', preset: 'claude_code' },
         disallowedTools: MAC_DISALLOWED,
         allowedTools: MAC_AUTO_ALLOWED,
         mcpServers: { [MCP_SERVER_NAME]: this.pcServer() },
         ...(sandbox ? { sandbox } : {}),
-        // The chat's own folder is its sandbox: edits there go through; a picked project still asks.
+        // The chat's own folder is its sandbox: edits and commands there go through; a picked project still asks.
         ...(place.own ? { permissionMode: 'acceptEdits' as const } : {}),
         systemPrompt: { type: 'preset', preset: 'claude_code', append: macSystemPrompt(cwd, readInstructions(cwd), pcName, { own: place.own, sandboxed: !!sandbox }) },
       };

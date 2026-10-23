@@ -62,11 +62,12 @@ async function connect(role: 'executor' | 'client', name: string) {
     deviceId: joined.deviceId,
     send: (body: Parameters<Link['send']>[1]) => link.send(brainId, body),
     inbox,
-    next: (type: InnerMessage['type']) =>
+    next: (type: InnerMessage['type'], also: (m: InnerMessage) => boolean = () => true) =>
       until<InnerMessage>(`${name} ← ${type}`, (resolve) => {
-        const hit = inbox.find((m) => m.type === type);
+        const match = (m: InnerMessage) => m.type === type && also(m);
+        const hit = inbox.find(match);
         if (hit) resolve(hit);
-        else waiters.push({ match: (m) => m.type === type, resolve });
+        else waiters.push({ match, resolve });
       }),
   };
 }
@@ -74,7 +75,12 @@ async function connect(role: 'executor' | 'client', name: string) {
 beforeAll(async () => {
   ensureDirs();
   relay = await startNodeRelay({ port: 0 });
-  brain = new Brain(generateIdentity(), { relayUrl: relay.url, devices: [], users: [], allowlist: [], sessions: [], replay: {} }, { persist: false });
+  // No Claude Code here: a turn records the user's message, then fails to start, which is all these tests need.
+  brain = new Brain(
+    generateIdentity(),
+    { relayUrl: relay.url, devices: [], users: [], allowlist: [], sessions: [], replay: {} },
+    { persist: false, claudeOptions: { pathToClaudeCodeExecutable: join(home, 'no-claude') } },
+  );
   brain.start();
   await until<void>('brain ready', (ok) => {
     const t = setInterval(() => brain.status().relayConnected && (clearInterval(t), ok()), 25);
@@ -128,5 +134,39 @@ describe('overlay executors', () => {
     plain.send({ type: 'session.history', payload: { sessionId } });
     await new Promise((r) => setTimeout(r, 300));
     expect(plain.inbox.map((m) => m.type).filter((t) => t.startsWith('session.'))).toEqual([]);
+  });
+
+  it('lets an overlay write into its person\'s chats, and no plain computer', async () => {
+    const overlay = await connect('executor', 'writing-pc');
+    const plain = await connect('executor', 'quiet-pc');
+    const phone = await connect('client', 'phone-2');
+    overlay.send({ type: 'executor.status', payload: { workspaces: [], os: 'win32', shell: 'none', capabilities: ['clipboard', 'overlay'] } });
+    plain.send({ type: 'executor.status', payload: { workspaces: [], os: 'win32', shell: 'none', capabilities: ['clipboard'] } });
+    await until<void>('both computers known', (ok) => {
+      const t = setInterval(() => {
+        const list = [...phone.inbox].reverse().find((m) => m.type === 'computers.result');
+        const ids = list?.type === 'computers.result' ? list.payload.computers.map((c) => c.deviceId) : [];
+        if (ids.includes(overlay.deviceId) && ids.includes(plain.deviceId)) (clearInterval(t), ok());
+      }, 25);
+    });
+    phone.send({ type: 'session.create', payload: { title: 'Typed on the PC' } });
+    const created = await overlay.next('session.created');
+    const sessionId = created.type === 'session.created' ? created.payload.session.sessionId : '';
+
+    const userEvent = (text: string) => (m: InnerMessage) => m.type === 'session.event' && m.payload.event.kind === 'user' && m.payload.event.text === text;
+    overlay.send({ type: 'message.send', payload: { sessionId, text: 'Привет с ПК' } });
+    const onPhone = await phone.next('session.event', userEvent('Привет с ПК'));
+    expect(onPhone.type === 'session.event' && onPhone.payload).toEqual({ sessionId, event: { kind: 'user', text: 'Привет с ПК', from: overlay.deviceId } });
+    // The overlay hears its own message come back: that is how it knows the message is in.
+    await overlay.next('session.event', userEvent('Привет с ПК'));
+
+    overlay.send({ type: 'message.send', payload: { sessionId: 'no-such-chat', text: 'lost' } });
+    const error = await overlay.next('error', (m) => m.type === 'error' && m.payload.code === 'unknown_session');
+    expect(error.type === 'error' && error.payload).toEqual({ code: 'unknown_session', message: 'Session not found' });
+
+    plain.send({ type: 'message.send', payload: { sessionId, text: 'sneaky' } });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(phone.inbox.filter(userEvent('sneaky'))).toEqual([]);
+    expect(plain.inbox.filter((m) => m.type === 'error' || m.type.startsWith('session.'))).toEqual([]);
   });
 });

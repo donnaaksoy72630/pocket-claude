@@ -5,7 +5,7 @@ import type { SessionMeta } from '@pocket/protocol';
 import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const dirs = vi.hoisted(() => {
-  const base = `${process.env.TMPDIR ?? '/tmp'}/pocket-session-test-${process.pid}`;
+  const base = `${(process.env.TMPDIR ?? '/tmp').replace(/\/+$/, '')}/pocket-session-test-${process.pid}`;
   process.env.POCKET_HOME = `${base}/home`;
   process.env.POCKET_WORKSPACE = `${base}/workspace`;
   process.env.POCKET_SKILLS_DIR = `${base}/no-skills`;

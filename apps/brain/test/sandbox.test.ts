@@ -4,7 +4,7 @@ import type { SessionMeta } from '@pocket/protocol';
 import { afterAll, describe, expect, it, vi } from 'vitest';
 
 const base = vi.hoisted(() => {
-  const dir = `${process.env.TMPDIR ?? '/tmp'}/pocket-sandbox-test-${process.pid}`;
+  const dir = `${(process.env.TMPDIR ?? '/tmp').replace(/\/+$/, '')}/pocket-sandbox-test-${process.pid}`;
   process.env.POCKET_WORKSPACE = `${dir}/workspace`;
   return dir;
 });
@@ -68,6 +68,10 @@ describe('Seatbelt sandbox', () => {
       network: { allowedDomains: SANDBOX_DOMAINS, allowLocalBinding: true },
     });
     expect(SANDBOX_DOMAINS).toEqual(expect.arrayContaining(['github.com', 'registry.npmjs.org', 'pypi.org']));
+  });
+
+  it('still asks for commands in a picked project, whose sources run outside the sandbox later', () => {
+    expect(macSandbox({}, { autoAllow: false })?.autoAllowBashIfSandboxed).toBe(false);
   });
 
   it('takes extra hosts from POCKET_SANDBOX_DOMAINS and can be switched off', () => {

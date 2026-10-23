@@ -22,8 +22,12 @@ function Dot({ delay, pulse }: { delay: number; pulse: boolean }) {
 }
 
 export function TypingBubble({ persona }: { persona?: Persona }) {
+  // Both hooks run on every render: `a() && !b()` skipped b() while the screen was inactive, and React crashed
+  // with "Rendered more hooks than during the previous render" once it became active again.
+  const active = useScreenActive();
+  const powerSaving = usePowerSaving();
   // An endless animation keeps the display busy every frame: only on screen, and not on a hot phone or in Low Power Mode.
-  const pulse = useScreenActive() && !usePowerSaving();
+  const pulse = active && !powerSaving;
   return (
     <View style={styles.row}>
       <ClaudeAvatar size={28} persona={persona} />
