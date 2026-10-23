@@ -4,7 +4,7 @@ import * as Haptics from '../src/haptics';
 import { useRouter } from 'expo-router';
 import type { ReactNode } from 'react';
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Linking, Pressable, ScrollView, Share, StyleSheet, Switch, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, ScrollView, Share, StyleSheet, Switch, Text, View } from 'react-native';
 import { alert } from '../src/alert';
 import { setCallPrefs, useCallPrefs } from '../src/call-prefs';
 import { QrCode } from '../src/components/QrCode';
@@ -16,6 +16,12 @@ import { keyboardLanguages, listVoices, nativeCalls, preferredLanguages } from '
 import { openTelegramLink, shareViaTelegram } from '../src/telegram';
 import { colors, mono } from '../src/theme';
 import { recentUserTexts, resolveCallLanguage } from '../src/voice';
+
+/** Where iOS keeps the voices to download: Read & Speak since iOS 26, Spoken Content before. */
+function voicesPath(language: string): string {
+  const where = 'iPhone Settings → Accessibility → Read & Speak (Spoken Content before iOS 26) → Voices';
+  return language.startsWith('ru') ? `${where} → Russian → Milena (Enhanced)` : `${where}: an Enhanced or Premium voice`;
+}
 
 const CALL_LANGUAGES = [
   { value: 'auto', label: 'Auto' },
@@ -130,14 +136,16 @@ export default function SettingsScreen() {
     [callPrefs.language, state.threads, keyboards],
   );
   const [voiceName, setVoiceName] = useState<string | null>(null);
+  /** The call language has an Enhanced or Premium voice installed. */
+  const [goodVoice, setGoodVoice] = useState(true);
   useEffect(() => {
     let live = true;
-    if (!callPrefs.voice) {
-      setVoiceName(null);
-      return;
-    }
     void listVoices(callLanguage)
-      .then((voices) => live && setVoiceName(voices.find((v) => v.identifier === callPrefs.voice)?.name ?? null))
+      .then((voices) => {
+        if (!live) return;
+        setVoiceName(callPrefs.voice ? (voices.find((v) => v.identifier === callPrefs.voice)?.name ?? null) : null);
+        setGoodVoice(voices.some((v) => v.quality !== 'default'));
+      })
       .catch(() => {});
     return () => {
       live = false;
@@ -162,8 +170,8 @@ export default function SettingsScreen() {
     alert(
       'Voice',
       voices.length
-        ? 'Enhanced and Premium voices sound far more natural. Download more in iPhone Settings → Accessibility → Spoken Content → Voices.'
-        : 'No voices for this language yet: iPhone Settings → Accessibility → Spoken Content → Voices.',
+        ? `Enhanced and Premium voices sound far more natural. Download one in ${voicesPath(callLanguage)}.`
+        : `No voices for this language yet: ${voicesPath(callLanguage)}.`,
       [
         { text: 'Best installed', onPress: () => choose(null) },
         ...voices.map((v) => ({ text: `${v.name}${quality(v.quality)}`, onPress: () => choose(v.identifier) })),
@@ -237,6 +245,15 @@ export default function SettingsScreen() {
           onPress={cycleCallLanguage}
         />
         <Row icon="mic-outline" label="Voice" value={voiceName ?? 'Best installed'} hint="Tap to hear and pick a voice" onPress={() => void pickVoice()} />
+        {Platform.OS === 'ios' && !goodVoice ? (
+          <Row
+            icon="download-outline"
+            label="Get a better voice"
+            hint={`Only robotic voices for this language so far. ${voicesPath(callLanguage)}. Tap to open iPhone Settings.`}
+            tint={colors.accent}
+            onPress={() => void Linking.openSettings()}
+          />
+        ) : null}
         <Row
           icon="volume-high-outline"
           label="Speaker"

@@ -859,6 +859,6 @@ const SNAPSHOT_KEYS: (keyof CallSnapshot)[] = [
 
 function voiceHint(lang: CallLang): string {
   return lang === 'ru'
-    ? 'A better Russian voice: iPhone Settings → Accessibility → Spoken Content → Voices → Russian → Milena or Yuri (Enhanced), then pick it in Pocket settings.'
-    : 'A better voice: iPhone Settings → Accessibility → Spoken Content → Voices, download an Enhanced or Premium voice, then pick it in Pocket settings.';
+    ? 'A better Russian voice: iPhone Settings → Accessibility → Read & Speak (Spoken Content before iOS 26) → Voices → Russian → Milena (Enhanced), then pick it in Pocket settings.'
+    : 'A better voice: iPhone Settings → Accessibility → Read & Speak (Spoken Content before iOS 26) → Voices, download an Enhanced or Premium voice, then pick it in Pocket settings.';
 }
