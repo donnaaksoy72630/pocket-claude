@@ -1,6 +1,7 @@
 import AVFoundation
 import Accelerate
 import Speech
+import UIKit
 import os
 
 /// NativeCallOptions from modules/pocket-call/index.ts.
@@ -82,6 +83,18 @@ final class CallEngine: NSObject {
   private var held = false
   private var thinking = false
   private var observers: [NSObjectProtocol] = []
+  /// The system call (lock screen, Dynamic Island); nil until the first call that uses it.
+  private var bridge: CallKitBridge?
+  /// CallKit activated the session, so CallKit deactivates it too.
+  private var sessionByCallKit = false
+  /// start() waits for the audio: at once without CallKit, until didActivate with it.
+  private var pendingStart: ((Result<[String: Any], Error>) -> Void)?
+  private var activationTimeout: DispatchWorkItem?
+  /// The session as the app had it before the call, restored after it.
+  private var savedSession: (category: AVAudioSession.Category, mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions)?
+  /// iOS starts no recognition request for an app in the background (kAFAssistantErrorDomain 1700).
+  private var appActive = true
+  private var backgroundBlocked = false
 
   // The audio graph
   private var engine: AVAudioEngine?
@@ -139,9 +152,11 @@ final class CallEngine: NSObject {
   func start(_ config: CallConfig, completion: @escaping (Result<[String: Any], Error>) -> Void) {
     queue.async {
       if self.running { self.shutdown() }
+      self.pendingStart = completion
       do {
-        completion(.success(try self.begin(config)))
+        try self.begin(config)
       } catch {
+        self.pendingStart = nil
         self.shutdown()
         completion(.failure(error))
       }
@@ -184,7 +199,14 @@ final class CallEngine: NSObject {
   }
 
   func setMuted(_ on: Bool) {
-    queue.async { self.mute(on) }
+    queue.async {
+      guard let bridge = self.bridge, bridge.active else {
+        self.mute(on)
+        return
+      }
+      // Through CallKit, so that the system call screen shows it too; the action comes back as onMute.
+      bridge.setMuted(on) { [weak self] in self?.mute(on) }
+    }
   }
 
   func setSpeaker(_ on: Bool) {
@@ -193,7 +215,7 @@ final class CallEngine: NSObject {
 
   // MARK: - Call lifecycle
 
-  private func begin(_ config: CallConfig) throws -> [String: Any] {
+  private func begin(_ config: CallConfig) throws {
     guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: config.language)) else {
       throw CallError(code: "language", message: "Speech recognition does not support \(config.language) on this iPhone.")
     }
@@ -209,41 +231,173 @@ final class CallEngine: NSObject {
     nextRecognitionAt = 0
     restartChain = 0
     rebuiltAt = 0
+    appActive = true
+    backgroundBlocked = false
+    let session = AVAudioSession.sharedInstance()
+    savedSession = (session.category, session.mode, session.categoryOptions)
     do {
       try configureSession(speaker: config.speaker)
-      try AVAudioSession.sharedInstance().setActive(true)
-      sessionActive = true
     } catch {
       throw CallError(code: "audio", message: "Could not start the call audio: \(error.localizedDescription)")
     }
-    try buildEngine()
     running = true
     observeSession()
+    guard config.useCallKit else {
+      try activateAudio(byCallKit: false)
+      return
+    }
+    // CallKit activates the session and calls didActivate, where the engine starts.
+    callKit().start(name: config.callerName) { [weak self] error in
+      self?.callKitStarted(error)
+    }
+    let timeout = DispatchWorkItem { [weak self] in
+      self?.activationTimedOut()
+    }
+    activationTimeout = timeout
+    queue.asyncAfter(deadline: .now() + 4, execute: timeout)
+  }
+
+  /// The session is on, activated by CallKit or by us: the engine starts and the call is on.
+  private func activateAudio(byCallKit: Bool) throws {
+    activationTimeout?.cancel()
+    activationTimeout = nil
+    if !byCallKit {
+      do {
+        try AVAudioSession.sharedInstance().setActive(true)
+      } catch {
+        throw CallError(code: "audio", message: "Could not start the call audio: \(error.localizedDescription)")
+      }
+    }
+    sessionActive = true
+    sessionByCallKit = byCallKit
+    try buildEngine()
     // Sentences JS sent while the call was starting.
     synthesizeNext()
     route = currentRoute()
     emit(["type": "state", "state": "active"])
     emit(["type": "route", "output": route])
     let format = engine?.inputNode.outputFormat(forBus: 0)
+    let callKitOn = bridge?.active == true
     note(
       "audio \(Int(format?.sampleRate ?? 0)) Hz, echo cancellation \(echoCancellation), "
-        + "recognition \(onDevice ? "on device" : "online"), voice \(voice?.name ?? "default"), route \(route)"
+        + "recognition \(onDevice ? "on device" : "online"), voice \(voice?.name ?? "default"), route \(route), "
+        + "CallKit \(callKitOn ? (byCallKit ? "on" : "on, audio started by the app") : "off")"
     )
-    if !recognizer.isAvailable {
+    if let recognizer, !recognizer.isAvailable {
       emit(["type": "recognitionError", "code": "unavailable", "message": "Speech recognition is unavailable right now."])
     }
-    return [
+    bridge?.reportConnected()
+    let pending = pendingStart
+    pendingStart = nil
+    pending?(.success([
       "echoCancellation": echoCancellation,
-      "callKit": false,
+      "callKit": callKitOn,
       "onDevice": onDevice,
       "voice": orNull(voice?.identifier),
       "voiceName": orNull(voice?.name),
       "voiceQuality": orNull(voice.map(CallVoices.quality)),
-    ]
+    ]))
+  }
+
+  private func callKit() -> CallKitBridge {
+    if let bridge { return bridge }
+    let made = CallKitBridge(queue: queue)
+    made.onActivate = { [weak self] in self?.callKitActivated() }
+    made.onDeactivate = { [weak self] in self?.callKitDeactivated() }
+    made.onEnded = { [weak self] in self?.endedOutside() }
+    made.onMute = { [weak self] muted in self?.mute(muted) }
+    made.onHold = { [weak self] on in self?.hold(on) }
+    made.onLog = { [weak self] message in self?.note(message) }
+    bridge = made
+    return made
+  }
+
+  private func callKitStarted(_ error: Error?) {
+    guard let error, running, engine == nil else { return }
+    note("CallKit did not start the call (\(error.localizedDescription)), going on without it")
+    startDirectly()
+  }
+
+  private func activationTimedOut() {
+    guard running, engine == nil else { return }
+    note("CallKit did not activate the audio in time, starting it from the app")
+    startDirectly()
+  }
+
+  private func startDirectly() {
+    do {
+      try activateAudio(byCallKit: false)
+    } catch {
+      failStart(error)
+    }
+  }
+
+  private func failStart(_ error: Error) {
+    let pending = pendingStart
+    pendingStart = nil
+    let wasRunning = running
+    shutdown()
+    if let pending {
+      pending(.failure(error))
+    } else if wasRunning {
+      emit(["type": "error", "code": "audio", "message": error.localizedDescription, "fatal": true])
+    }
+  }
+
+  private func callKitActivated() {
+    guard running else { return }
+    if engine == nil {
+      do {
+        try activateAudio(byCallKit: true)
+      } catch {
+        failStart(error)
+      }
+    } else if engine?.isRunning != true {
+      // Back from a hold or another call: the same engine starts again.
+      sessionActive = true
+      restartAudio("CallKit activated the audio")
+    }
+  }
+
+  private func callKitDeactivated() {
+    guard running, let engine else { return }
+    note("CallKit deactivated the audio")
+    endCapture()
+    // What the players drop now is scheduled again when the audio is back.
+    playbackGeneration += 1
+    engine.stop()
+  }
+
+  /// A phone call came in and the user put this one on hold, or took it back.
+  private func hold(_ on: Bool) {
+    guard running, held != on else { return }
+    held = on
+    note(on ? "call on hold" : "call taken off hold")
+    if on {
+      endCapture()
+      chimePlayer?.stop()
+    } else {
+      updateChime()
+    }
+    emit(["type": "state", "state": on ? "held" : "active"])
+  }
+
+  /// Ended from the lock screen, a headset or by another call.
+  private func endedOutside() {
+    guard running || pendingStart != nil else { return }
+    note("call ended outside the app")
+    let pending = pendingStart
+    pendingStart = nil
+    shutdown()
+    pending?(.failure(CallError(code: "ended", message: "The call was ended.")))
+    emit(["type": "state", "state": "ended", "reason": "remote"])
   }
 
   private func shutdown() {
     running = false
+    activationTimeout?.cancel()
+    activationTimeout = nil
+    bridge?.end()
     for observer in observers {
       NotificationCenter.default.removeObserver(observer)
     }
@@ -268,13 +422,25 @@ final class CallEngine: NSObject {
     restartPending = false
     lastUtterance = nil
     config = nil
-    if sessionActive {
-      sessionActive = false
+    let session = AVAudioSession.sharedInstance()
+    // CallKit deactivates the session it activated.
+    if sessionActive && !sessionByCallKit {
       do {
-        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        try session.setActive(false, options: .notifyOthersOnDeactivation)
       } catch {
         logger.notice("audio session deactivation: \(error.localizedDescription, privacy: .public)")
       }
+    }
+    sessionActive = false
+    sessionByCallKit = false
+    if let saved = savedSession {
+      savedSession = nil
+      // Videos after the call get the session as it was, not the call's voice-chat setup.
+      try? session.setCategory(saved.category, mode: saved.mode, options: saved.options)
+    }
+    if let pending = pendingStart {
+      pendingStart = nil
+      pending(.failure(CallError(code: "ended", message: "The call has ended.")))
     }
   }
 
@@ -397,6 +563,10 @@ final class CallEngine: NSObject {
       engine.prepare()
       do {
         try engine.start()
+        // What the players still held is scheduled again below, from the first sound not heard yet.
+        playbackGeneration += 1
+        speechPlayer?.stop()
+        chimePlayer?.stop()
         speechPlayer?.play()
         rebuiltAt = uptime()
         noiseFloor = -60
@@ -438,11 +608,22 @@ final class CallEngine: NSObject {
       center.addObserver(forName: AVAudioSession.mediaServicesWereResetNotification, object: session, queue: nil) { [weak self] _ in
         self?.queue.async { self?.mediaServicesReset() }
       },
+      center.addObserver(forName: UIApplication.willResignActiveNotification, object: nil, queue: nil) { [weak self] _ in
+        self?.queue.async { self?.resigningActive() }
+      },
+      center.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: nil) { [weak self] _ in
+        self?.queue.async { self?.becameActive() }
+      },
     ]
   }
 
   private func interrupted(_ type: AVAudioSession.InterruptionType?) {
     guard running, let type else { return }
+    // CallKit reports holds and the audio coming and going itself.
+    if sessionByCallKit {
+      note("audio interruption \(type == .began ? "began" : "ended") during a CallKit call")
+      return
+    }
     switch type {
     case .began:
       guard !held else { return }
@@ -469,11 +650,19 @@ final class CallEngine: NSObject {
     resume("media services were reset")
   }
 
-  private func resume(_ reason: String) {
+  private func resume(_ reason: String, attempt: Int = 0) {
     do {
       try AVAudioSession.sharedInstance().setActive(true)
     } catch {
-      note("could not resume audio: \(error.localizedDescription)")
+      // Right after a phone call iOS may not hand the audio back yet.
+      guard attempt < 5 else {
+        note("could not resume audio: \(error.localizedDescription)")
+        return
+      }
+      queue.asyncAfter(deadline: .now() + Double(attempt + 1)) { [weak self] in
+        guard let self, self.running, self.held else { return }
+        self.resume(reason, attempt: attempt + 1)
+      }
       return
     }
     held = false
@@ -502,7 +691,16 @@ final class CallEngine: NSObject {
     let now = uptime()
     let seconds = Double(buffer.frameLength) / buffer.format.sampleRate
     detectVoice(level: level, seconds: seconds, now: now)
+    if let current = recognition, let format = current.format,
+      buffer.format.sampleRate != format.sampleRate || buffer.format.channelCount != format.channelCount
+    {
+      // A new route brought a new input format; a request takes one format only.
+      let standing = current.standing
+      closeRecognition()
+      if standing && !appActive { blockBackground("the audio route changed") }
+    }
     if let current = recognition, current.finishingSince == nil {
+      if current.format == nil { current.format = buffer.format }
       current.request.append(buffer)
       checkEndpoint(current, now: now)
       return
@@ -511,8 +709,44 @@ final class CallEngine: NSObject {
     if let since = recognition?.finishingSince {
       if now - since >= Tuning.finalWait { commit() }
     } else if userSpeaking && now >= nextRecognitionAt {
-      startRecognition(now: now, level: level)
+      if appActive {
+        startRecognition(now: now, level: level)
+      } else {
+        blockBackground("no recognition request was running when the app left the screen")
+      }
     }
+  }
+
+  /// The app is leaving the screen: a request started now, while it still is in front, serves every utterance until
+  /// it is back.
+  private func resigningActive() {
+    appActive = false
+    guard running, engine?.isRunning == true, !held else { return }
+    if let current = recognition {
+      if current.finishingSince == nil { current.standing = true }
+    } else {
+      startRecognition(now: uptime(), level: nil, standing: true)
+    }
+  }
+
+  private func becameActive() {
+    appActive = true
+    backgroundBlocked = false
+    guard let current = recognition, current.standing else { return }
+    // Back to one request per utterance; one that has heard nothing yet is not needed.
+    current.standing = false
+    if current.heard.isEmpty { dropRecognition() }
+  }
+
+  /// No request can start until the app is back in front: say so once rather than retry.
+  private func blockBackground(_ reason: String) {
+    guard !backgroundBlocked else { return }
+    backgroundBlocked = true
+    note("listening in the background stopped: \(reason)")
+    emit([
+      "type": "error", "code": "background", "fatal": false,
+      "message": "Listening paused while Pocket is in the background. Open Pocket to keep talking.",
+    ])
   }
 
   /// Voice by level over a noise floor that follows quiet at once and steady noise slowly (about 1 dB/s).
@@ -561,7 +795,7 @@ final class CallEngine: NSObject {
     prebufferSeconds = 0
   }
 
-  private func startRecognition(now: TimeInterval, level: Float) {
+  private func startRecognition(now: TimeInterval, level: Float?, standing: Bool = false) {
     guard let recognizer, let config else { return }
     guard recognizer.isAvailable else {
       failRecognition(code: "unavailable", message: "Speech recognition is unavailable right now.", now: now)
@@ -576,11 +810,15 @@ final class CallEngine: NSObject {
     recognitionToken += 1
     let token = recognitionToken
     let current = Recognition(token: token, request: request, startedAt: now)
+    current.standing = standing
+    current.format = prebuffer.first?.format
     current.task = recognizer.recognitionTask(with: request) { [weak self] result, error in
-      let text = result?.bestTranscription.formattedString
+      let transcription = result?.bestTranscription
+      let text = transcription?.formattedString
+      let starts = transcription?.segments.map { $0.substringRange.location } ?? []
       let isFinal = result?.isFinal ?? false
       self?.queue.async {
-        self?.recognized(token: token, text: text, isFinal: isFinal, error: error)
+        self?.recognized(token: token, text: text, starts: starts, isFinal: isFinal, error: error)
       }
     }
     recognition = current
@@ -589,27 +827,40 @@ final class CallEngine: NSObject {
     }
     clearPrebuffer()
     emit(["type": "capture", "active": true])
-    note("listening: voice \(Int(level)) dB, noise \(Int(noiseFloor)) dB")
+    if let level {
+      note("listening: voice \(Int(level)) dB, noise \(Int(noiseFloor)) dB")
+    } else {
+      note("listening in the background: one request for every utterance until the app is back")
+    }
   }
 
-  private func recognized(token: Int, text: String?, isFinal: Bool, error: Error?) {
+  private func recognized(token: Int, text: String?, starts: [Int], isFinal: Bool, error: Error?) {
     guard let current = recognition, current.token == token else { return }
     let now = uptime()
-    if let text = text?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty, text != current.heard {
-      current.heard = text
-      current.changedAt = now
-      recognitionFailures = 0
-      quickEnds = 0
-      emit(["type": "partial", "text": text])
+    if let text {
+      current.segments = starts.count
+      let heard = CallEngine.utterance(text, starts: starts, after: current.committed)
+      if !heard.isEmpty, heard != current.heard {
+        current.heard = heard
+        current.changedAt = now
+        recognitionFailures = 0
+        quickEnds = 0
+        emit(["type": "partial", "text": heard])
+      }
     }
-    if (isFinal || error != nil) && current.heard.isEmpty && now - current.startedAt < 1 {
+    guard isFinal || error != nil else { return }
+    let heard = current.heard
+    if heard.isEmpty && now - current.startedAt < 1 {
       endedAtOnce(now)
     }
-    if isFinal || (error != nil && !current.heard.isEmpty) {
-      commit()
-    } else if let error {
-      dropRecognition()
+    // The request is over, a standing one too: what it heard goes to JS.
+    closeRecognition()
+    if let error, heard.isEmpty, !isFinal {
+      clearPrebuffer()
       recognitionFailed(error as NSError, now: now)
+    }
+    if current.standing && !appActive {
+      blockBackground(error.map { ($0 as NSError).localizedDescription } ?? "the recognizer ended the request")
     }
   }
 
@@ -623,6 +874,13 @@ final class CallEngine: NSObject {
 
   /// The utterance is over: say when the pause is long enough for what was said, like endpointDelay in src/voice.ts.
   private func checkEndpoint(_ current: Recognition, now: TimeInterval) {
+    if current.standing {
+      // Kept until the app is back in front: each utterance is cut out of it instead of ending it.
+      if !current.heard.isEmpty, !userSpeaking, now - max(current.changedAt, lastVoiceAt) >= endpointDelay(current.heard) {
+        commit()
+      }
+      return
+    }
     let tooLong = now - current.startedAt >= Tuning.maxRequest
     if current.heard.isEmpty {
       if tooLong || (!userSpeaking && now - lastVoiceAt >= Tuning.noWords) {
@@ -657,13 +915,39 @@ final class CallEngine: NSObject {
       .filter { !$0.isEmpty }
   }
 
-  /// Ends the request and hands JS what was heard.
+  /// Hands JS what was heard: a standing request goes on, any other one ends.
   private func commit() {
+    guard let current = recognition else { return }
+    guard current.standing, current.finishingSince == nil else {
+      closeRecognition()
+      return
+    }
+    let text = current.heard
+    current.committed = current.segments
+    current.heard = ""
+    guard !text.isEmpty else { return }
+    lastUtterance = (sent: uptime(), voiceEnded: lastVoiceAt)
+    emit(["type": "final", "text": text])
+  }
+
+  /// Ends the request, whatever kind it is, and hands JS what it heard.
+  private func closeRecognition() {
     guard let current = recognition else { return }
     endRecognition()
     guard !current.heard.isEmpty else { return }
     lastUtterance = (sent: uptime(), voiceEnded: lastVoiceAt)
     emit(["type": "final", "text": current.heard])
+  }
+
+  /// A transcript without its first `committed` segments: what a standing request heard since the last utterance.
+  static func utterance(_ text: String, starts: [Int], after committed: Int) -> String {
+    var rest = text
+    if committed > 0 {
+      guard committed < starts.count else { return "" }
+      let all = text as NSString
+      rest = all.substring(from: min(max(starts[committed], 0), all.length))
+    }
+    return rest.trimmingCharacters(in: .whitespacesAndNewlines)
   }
 
   private func endRecognition() {
@@ -675,7 +959,12 @@ final class CallEngine: NSObject {
 
   /// Drops the request and the audio waiting for one: noise, or the phone's own voice.
   private func dropRecognition() {
-    endRecognition()
+    if let current = recognition, current.standing, current.finishingSince == nil {
+      current.committed = current.segments
+      current.heard = ""
+    } else {
+      endRecognition()
+    }
     clearPrebuffer()
   }
 
@@ -688,6 +977,10 @@ final class CallEngine: NSObject {
 
   private func recognitionFailed(_ error: NSError, now: TimeInterval) {
     let code = error.code
+    if error.domain == "kAFAssistantErrorDomain", code == 1700, !appActive {
+      blockBackground("iOS does not start speech recognition in the background")
+      return
+    }
     // Nothing was said (1110; 203 "Retry" over SiriSpeechErrorDomain 1), or the request was cancelled (216, 301).
     if error.domain == "kAFAssistantErrorDomain", code == 1110 || code == 216 { return }
     if error.domain == "kLSRErrorDomain", code == 301 { return }
@@ -1002,16 +1295,25 @@ extension CallEngine: SFSpeechRecognizerDelegate {
   }
 }
 
-/// One recognition request: from the first word of an utterance to its end.
+/// One recognition request: from the first word of an utterance to its end, or, while the app is in the background,
+/// for every utterance until it is back in front.
 private final class Recognition {
   let token: Int
   let request: SFSpeechAudioBufferRecognitionRequest
   let startedAt: TimeInterval
   var task: SFSpeechRecognitionTask?
+  /// What the user is saying: the transcript after what was handed to JS already.
   var heard = ""
   var changedAt: TimeInterval
   /// endAudio() was called: waiting for the final transcript.
   var finishingSince: TimeInterval?
+  /// Kept for every utterance while the app is in the background.
+  var standing = false
+  /// Segments of the transcript handed to JS already, and in the latest result.
+  var committed = 0
+  var segments = 0
+  /// The format of the first buffer: a request takes one format only.
+  var format: AVAudioFormat?
 
   init(token: Int, request: SFSpeechAudioBufferRecognitionRequest, startedAt: TimeInterval) {
     self.token = token
