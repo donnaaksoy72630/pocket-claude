@@ -253,7 +253,8 @@ export function groupOf(actions: OverlayAction[]): { label: string; summary: str
   for (const a of actions) counts.set(a.label, (counts.get(a.label) ?? 0) + 1);
   const failed = actions.filter((a) => a.state === 'error').length;
   const kinds = [...counts].map(([l, n]) => (n > 1 ? `${l} ×${n}` : l));
-  return { label, summary: [...kinds, ...(failed ? [plural(failed, 'ошибка', 'ошибки', 'ошибок')] : [])].join(' · ') };
+  // Failures go first: a long line is cut at its end.
+  return { label, summary: [...(failed ? [plural(failed, 'ошибка', 'ошибки', 'ошибок')] : []), ...kinds].join(' · ') };
 }
 
 export function runState(actions: OverlayAction[]): ActionState {

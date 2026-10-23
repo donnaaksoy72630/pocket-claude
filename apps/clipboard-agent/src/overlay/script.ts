@@ -621,7 +621,12 @@ namespace PocketOverlay
             Row row = rows[i];
             int slot = i - renderFrom;
             FrameworkElement view = BuildRow(row);
-            if (row.View != null && slot < chatList.Children.Count && chatList.Children[slot] == row.View) chatList.Children[slot] = view;
+            if (row.View != null && slot < chatList.Children.Count && chatList.Children[slot] == row.View)
+            {
+                // A panel slot cannot be overwritten while it holds a child: take the old view out first.
+                chatList.Children.RemoveAt(slot);
+                chatList.Children.Insert(slot, view);
+            }
             else if (row.View == null && slot == chatList.Children.Count) chatList.Children.Add(view);
             else
             {

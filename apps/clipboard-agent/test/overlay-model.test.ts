@@ -104,7 +104,7 @@ describe('OverlayModel', () => {
     const [user, run, reply] = latest('reset').messages;
     expect(user?.role).toBe('user');
     const actions = actionsOf(run);
-    expect(actions.group).toEqual({ label: '3 действия', summary: 'Команда · Чтение · Правка · 1 ошибка' });
+    expect(actions.group).toEqual({ label: '3 действия', summary: '1 ошибка · Команда · Чтение · Правка' });
     expect(actions.state).toBe('error');
     expect(actions.actions.map((a) => [a.kind, a.label, a.short, a.state])).toEqual([
       ['command', 'Команда', 'pnpm test --filter…', 'done'],
