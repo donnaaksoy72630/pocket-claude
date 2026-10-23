@@ -20,6 +20,8 @@ public final class PocketCallModule: Module {
         self?.sendEvent("onPowerChange", state)
       }
       power.start()
+      // Long before the first call: CallKit refuses a call requested right after its provider was made.
+      engine.prepareCallKit()
     }
 
     OnDestroy {
