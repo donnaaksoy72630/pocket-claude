@@ -22,7 +22,7 @@
 | 0 | ✅ План | Изучение кода, этот файл | `plan: wave 3` |
 | 1 | ✅ 1. Модель и мышление голосом | Инструменты `chat_models` и `chat_configure`, Fable в списках, подсказки для чата и звонка, тесты | `brain: Claude switches its own model and effort` |
 | 2 | ✅ 2. Песочница чата на Mac | Папка на чат, память `NOTES.md`, вложения в папке чата, Seatbelt-песочница для Bash, разрешения на сеть по хостам, тесты | `brain: a sandbox folder per Mac chat` |
-| 3 | 3а. PocketClipboard: руки | Протокол `computer.act`/`computer.done`, PowerShell + C# хост: экран, мышь, клавиатура, окна, запуск программ; проверка синтаксиса через pwsh | `clipboard-agent: computer control host` |
+| 3 | ✅ 3а. PocketClipboard: руки | Протокол `computer.act`/`computer.done`, PowerShell + C# хост: экран, мышь, клавиатура, окна, запуск программ; проверка синтаксиса через pwsh | `clipboard-agent: computer control host` |
 | 4 | 3б. Brain: инструмент `computer` | Инструмент в формате computer use, пересчёт координат, авто-скриншот после действия, одно разрешение на чат, подсказки, стоп, тесты | `brain: computer use tool` |
 | 5 | 4. Подписи, документация, PR | Понятные подписи действий в приложении, Telegram и звонке; README, PLAN, чек-лист приёмки; отчёт в PR | `docs: wave 3` |
 
@@ -56,7 +56,7 @@
 - Выключатель: `POCKET_SANDBOX=off` (переменная окружения brain).
 - Проверка: тесты выбора папки (новый чат, старый чат, проект), сборки опций песочницы, заметок и вложений, ключей разрешений по хостам.
 
-### Этап 3а — PocketClipboard: экран, мышь, клавиатура, окна (`packages/protocol`, `apps/clipboard-agent`)
+### ✅ Этап 3а — PocketClipboard: экран, мышь, клавиатура, окна (`packages/protocol`, `apps/clipboard-agent`)
 
 - Протокол: `computer.act { requestId, action }` от brain к компьютеру и `computer.done { requestId, image?, display?, displays?, cursor?, windows?, text?, error? }` обратно. Новая capability `computer`.
 - Хост — долгоживущий `powershell.exe -STA -File computer.ps1` с C#-классом через `Add-Type`. Класс компилируется один раз при старте, команды идут JSON-строками, как у оверлея. При падении хост перезапускается.

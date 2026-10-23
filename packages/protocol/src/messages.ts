@@ -79,6 +79,79 @@ export type ClipboardItem = z.infer<typeof clipboardItemSchema>;
 export const screenImageSchema = z.object({ mime: z.string(), dataBase64: z.string(), width: z.number().int().positive(), height: z.number().int().positive() });
 export type ScreenImage = z.infer<typeof screenImageSchema>;
 
+const px = z.number().int();
+const size = z.number().int().positive();
+const mouseButtonSchema = z.enum(['left', 'right', 'middle']);
+/** Key names held during a click or scroll, e.g. ["ctrl"], ["shift"]. */
+const modifiersSchema = z.array(z.string().min(1).max(20)).max(4).optional();
+
+/** A monitor of a computer, in physical pixels of the whole desktop. */
+export const displaySchema = z.object({
+  index: z.number().int().min(0),
+  x: px,
+  y: px,
+  width: size,
+  height: size,
+  primary: z.boolean(),
+  /** 1.25 for a display set to 125 %. */
+  scale: z.number().positive().optional(),
+});
+export type Display = z.infer<typeof displaySchema>;
+
+export const windowInfoSchema = z.object({
+  /** The window handle as a decimal string; pass it back to act on the window. */
+  handle: z.string(),
+  title: z.string(),
+  process: z.string(),
+  x: px,
+  y: px,
+  width: z.number().int().min(0),
+  height: z.number().int().min(0),
+  minimized: z.boolean(),
+  maximized: z.boolean(),
+  focused: z.boolean(),
+  /** Index of the display the window is on; absent for minimized windows. */
+  display: z.number().int().min(0).optional(),
+});
+export type WindowInfo = z.infer<typeof windowInfoSchema>;
+
+/**
+ * One step of computer use on a PocketClipboard computer. Coordinates are physical pixels of the whole desktop;
+ * the brain converts from screenshot pixels. `key` takes xdotool-style names: "ctrl+shift+esc", "Return", "super+r".
+ */
+export const computerActionSchema = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('screenshot'), display: z.number().int().min(0).optional(), maxWidth: z.number().int().min(200).max(4000).optional(), maxHeight: z.number().int().min(200).max(4000).optional() }),
+  z.object({ action: z.literal('zoom'), x: px, y: px, width: size, height: size, maxWidth: z.number().int().min(200).max(4000).optional(), maxHeight: z.number().int().min(200).max(4000).optional() }),
+  z.object({ action: z.literal('move'), x: px, y: px }),
+  /** Without x/y the click lands where the pointer is. */
+  z.object({ action: z.literal('click'), x: px.optional(), y: px.optional(), button: mouseButtonSchema, count: z.number().int().min(1).max(3), modifiers: modifiersSchema }),
+  z.object({ action: z.literal('button'), button: mouseButtonSchema, down: z.boolean() }),
+  z.object({ action: z.literal('drag'), path: z.array(z.tuple([px, px])).min(2).max(50), button: mouseButtonSchema.optional() }),
+  /** Wheel notches: dy > 0 scrolls down, dx > 0 scrolls right. */
+  z.object({ action: z.literal('scroll'), x: px.optional(), y: px.optional(), dx: z.number().int().min(-50).max(50), dy: z.number().int().min(-50).max(50), modifiers: modifiersSchema }),
+  z.object({ action: z.literal('type'), text: z.string().min(1).max(20_000) }),
+  z.object({ action: z.literal('key'), keys: z.string().min(1).max(200), holdMs: z.number().int().min(0).max(10_000).optional() }),
+  z.object({ action: z.literal('cursor') }),
+  z.object({ action: z.literal('windows') }),
+  z.object({ action: z.literal('window'), handle: z.string().regex(/^\d+$/), op: z.enum(['focus', 'minimize', 'maximize', 'restore', 'close']) }),
+  /** A program, file, folder or URL, as the Run dialog takes it: "powershell", "chrome", "https://…", "notepad". */
+  z.object({ action: z.literal('open'), target: z.string().min(1).max(2000), args: z.string().max(8000).optional() }),
+  /** Lets go of every key and mouse button: what the kill switch does. */
+  z.object({ action: z.literal('release') }),
+]);
+export type ComputerAction = z.infer<typeof computerActionSchema>;
+
+/** What a step returns; screenshots and zooms say which part of the desktop the picture shows. */
+export const computerResultSchema = z.object({
+  image: screenImageSchema.optional(),
+  region: z.object({ x: px, y: px, width: size, height: size }).optional(),
+  displays: z.array(displaySchema).optional(),
+  cursor: z.object({ x: px, y: px }).optional(),
+  windows: z.array(windowInfoSchema).optional(),
+  text: z.string().optional(),
+});
+export type ComputerResult = z.infer<typeof computerResultSchema>;
+
 export const modelInfoSchema = z.object({
   value: z.string(),
   displayName: z.string(),
@@ -250,6 +323,9 @@ export const innerMessageBodySchema = z.discriminatedUnion('type', [
   m('clipboard.done', z.object({ requestId: z.string(), error: z.string().optional() })),
   m('screen.capture', z.object({ requestId: z.string() })),
   m('screen.image', z.object({ requestId: z.string(), image: screenImageSchema.optional(), error: z.string().optional() })),
+  /** Computer use on a computer with the 'computer' capability (PocketClipboard on Windows). */
+  m('computer.act', z.object({ requestId: z.string(), action: computerActionSchema })),
+  m('computer.done', computerResultSchema.extend({ requestId: z.string(), error: z.string().optional() })),
   m('tool.result', z.object({ callId: z.string(), content: z.string(), isError: z.boolean() })),
   m('tool.output', z.object({ callId: z.string(), chunk: z.string(), stream: z.enum(['stdout', 'stderr']) })),
   m('tool.cancel', z.object({ callId: z.string() })),
@@ -260,7 +336,8 @@ export const innerMessageBodySchema = z.discriminatedUnion('type', [
     projects: z.array(projectSchema).optional(),
     /**
      * What this computer offers: 'tools' (VS Code extension), 'clipboard' (PocketClipboard), 'screenshot' (PocketClipboard answers screen.capture),
-     * 'overlay' (PocketClipboard shows the chat on screen: it receives session events and may list sessions and read history).
+     * 'overlay' (PocketClipboard shows the chat on screen: it receives session events and may list sessions and read history),
+     * 'computer' (PocketClipboard answers computer.act: screen, mouse, keyboard, windows).
      */
     capabilities: z.array(z.string()).optional(),
   })),

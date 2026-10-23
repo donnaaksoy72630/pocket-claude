@@ -31,8 +31,20 @@ const until = <T>(what: string, fn: (resolve: (v: T) => void) => void, ms = 10_0
     });
   });
 
+/** The brain publishes a code over its WebSocket; under load the HTTP lookup can get to the relay first. */
+async function joinWhenPublished(opts: Parameters<typeof joinAccount>[0]) {
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await joinAccount(opts);
+    } catch (e) {
+      if (attempt >= 20 || !/not found/.test(String(e))) throw e;
+      await new Promise((r) => setTimeout(r, 50));
+    }
+  }
+}
+
 async function connect(code: PairingCode, role: 'executor' | 'client', name: string, userName?: string) {
-  const joined = await joinAccount({ relayUrl: relay.url, code, role, name, userName });
+  const joined = await joinWhenPublished({ relayUrl: relay.url, code, role, name, userName });
   const link = new DeviceLink({
     relayUrl: relay.url,
     accountId: joined.bundle.accountId,

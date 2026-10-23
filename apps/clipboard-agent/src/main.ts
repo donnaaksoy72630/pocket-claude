@@ -9,6 +9,7 @@ import { joinAccount, type WebSocketCtor } from '@pocket/transport';
 import WebSocket from 'ws';
 import { ClipboardAgent, type AgentState } from './agent.js';
 import { macClipboard, windowsClipboard } from './clipboard.js';
+import { COMPUTER_PS, ComputerHost } from './computer.js';
 import { OverlayModel } from './overlay/model.js';
 import { OVERLAY_PS } from './overlay/script.js';
 import { OverlayWindow } from './overlay/window.js';
@@ -25,6 +26,7 @@ const files = {
   exe: path.join(home, `${APP}.exe`),
   vbs: path.join(home, 'start-hidden.vbs'),
   overlay: path.join(home, 'overlay.ps1'),
+  computer: path.join(home, 'computer.ps1'),
 };
 const user = (os.userInfo().username || 'user').replace(/[^\w.-]/g, '_');
 const pipe = win ? `\\\\.\\pipe\\pocket-clipboard-${user}` : path.join(os.tmpdir(), `pocket-clipboard-${user}.sock`);
@@ -120,6 +122,7 @@ async function run(): Promise<void> {
   }
   if (!win) rmSync(pipe, { force: true });
   let agent: ClipboardAgent | undefined;
+  let computer: ComputerHost | undefined;
   let overlay: { model: OverlayModel; window: OverlayWindow } | undefined;
   const startOverlay = () => {
     if (overlay || !win) return;
@@ -169,9 +172,14 @@ async function run(): Promise<void> {
     process.exit(0);
   });
   server.listen(pipe, () => {
+    if (win) {
+      writeFileSync(files.computer, COMPUTER_PS);
+      computer = new ComputerHost({ script: files.computer, log });
+    }
     agent = new ClipboardAgent(state, {
       clipboard: win ? windowsClipboard : macClipboard,
       screen: win ? windowsScreen : undefined,
+      computer,
       WebSocket: WS,
       log,
       onRelayMoved: (url) => {
@@ -192,6 +200,7 @@ async function run(): Promise<void> {
   const shutdown = () => {
     clearInterval(persist);
     stopOverlay();
+    computer?.close();
     if (agent) {
       state.replay = agent.replayState();
       saveState(state);

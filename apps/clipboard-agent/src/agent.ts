@@ -2,6 +2,7 @@ import * as os from 'node:os';
 import { deserializeIdentity, type InnerMessageBody, type SerializedIdentity } from '@pocket/protocol';
 import { DeviceLink, type IncomingMessage, type WebSocketCtor } from '@pocket/transport';
 import type { ClipboardBackend } from './clipboard.js';
+import type { ComputerBackend } from './computer.js';
 import type { ScreenBackend } from './screenshot.js';
 
 export interface AgentState {
@@ -25,7 +26,7 @@ export interface OverlaySink {
   handle(message: InnerMessageBody): void;
 }
 
-/** Shares this computer's clipboard with the paired Mac and nothing else: no files, no commands. */
+/** Shares this computer's clipboard and screen with the paired Mac and, when allowed, its mouse and keyboard; no files, no commands. */
 export class ClipboardAgent {
   private readonly link: DeviceLink;
   private overlay: OverlaySink | undefined;
@@ -36,6 +37,8 @@ export class ClipboardAgent {
       clipboard: ClipboardBackend;
       /** Screenshots on request; absent means the computer does not offer them. */
       screen?: ScreenBackend;
+      /** Computer use: screen, mouse, keyboard and windows; absent means the computer does not offer it. */
+      computer?: ComputerBackend;
       WebSocket?: WebSocketCtor;
       log: (m: string) => void;
       /** The relay moved; the caller persists the new address. */
@@ -92,7 +95,7 @@ export class ClipboardAgent {
   }
 
   private sendStatus(): void {
-    const capabilities = ['clipboard', ...(this.opts.screen ? ['screenshot'] : []), ...(this.overlay ? ['overlay'] : [])];
+    const capabilities = ['clipboard', ...(this.opts.screen ? ['screenshot'] : []), ...(this.opts.computer ? ['computer'] : []), ...(this.overlay ? ['overlay'] : [])];
     this.send({ type: 'executor.status', payload: { workspaces: [], os: `${os.platform()} ${os.release()}`, shell: 'none', capabilities } });
     this.overlay?.connected();
   }
@@ -134,6 +137,23 @@ export class ClipboardAgent {
         }
         return;
       }
+      case 'computer.act': {
+        const { requestId, action } = message.payload;
+        if (!this.opts.computer) return this.send({ type: 'computer.done', payload: { requestId, error: 'This computer cannot be controlled: PocketClipboard runs here without computer use.' } });
+        try {
+          const result = await this.opts.computer.act(action);
+          // Only the kind of step: typed text and window titles stay off the log.
+          this.opts.log(`computer: ${action.action}${result.image ? ` ${result.image.width}x${result.image.height}` : ''}`);
+          this.send({ type: 'computer.done', payload: { requestId, ...result } });
+        } catch (e) {
+          this.opts.log(`computer: ${action.action} failed: ${e instanceof Error ? e.message : String(e)}`);
+          this.send({ type: 'computer.done', payload: { requestId, error: e instanceof Error ? e.message : String(e) } });
+        }
+        return;
+      }
+      case 'control.kill':
+        this.opts.computer?.release();
+        return;
       case 'tool.call':
         this.send({ type: 'tool.result', payload: { callId: message.payload.callId, content: 'This computer only shares its clipboard and screen.', isError: true } });
         return;
