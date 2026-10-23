@@ -26,6 +26,8 @@ class FakeChild extends EventEmitter {
   }
 }
 
+const snap = (n: number) => ({ op: 'reset' as const, chatId: null, title: `snap ${n}`, status: { text: '', tone: 'idle' as const }, messages: [], chats: [], loading: false, theme: 'dark' as const });
+
 function setup() {
   const children: FakeChild[] = [];
   const spawned: { command: string; args: string[] }[] = [];
@@ -34,7 +36,7 @@ function setup() {
   let snapshot = 0;
   const win = new OverlayWindow({
     script: 'C:\\overlay.ps1',
-    snapshot: () => ({ op: 'reset', title: `snap ${++snapshot}`, messages: [], theme: 'dark' }),
+    snapshot: () => snap(++snapshot),
     log: (m) => logs.push(m),
     onEvent: (e) => events.push(e),
     spawn: ((command: string, args: string[]) => {
@@ -57,15 +59,15 @@ describe('OverlayWindow', () => {
     expect(spawned[0]).toEqual({ command: 'powershell.exe', args: ['-NoProfile', '-NonInteractive', '-STA', '-ExecutionPolicy', 'Bypass', '-File', 'C:\\overlay.ps1'] });
     expect(win.send({ op: 'title', title: 'Chat' })).toBe(true);
     await vi.advanceTimersByTimeAsync(0);
-    expect(children[0]?.lines.map((l) => JSON.parse(l))).toEqual([{ op: 'reset', title: 'snap 1', messages: [], theme: 'dark' }, { op: 'title', title: 'Chat' }]);
+    expect(children[0]?.lines.map((l) => JSON.parse(l))).toEqual([snap(1), { op: 'title', title: 'Chat' }]);
   });
 
   it('parses events from stdout and logs everything else', async () => {
     const { win, children, events, logs } = setup();
     win.start();
-    children[0]?.stdout.write('{"ev":"copied","what":"code"}\nnot json\n{"ev":"error","message":"bad"}\n');
+    children[0]?.stdout.write('{"ev":"copied","what":"code"}\nnot json\n{"ev":"open","id":"c1"}\n{"ev":"error","message":"bad"}\n');
     await vi.advanceTimersByTimeAsync(0);
-    expect(events).toEqual([{ ev: 'copied', what: 'code' }, { ev: 'error', message: 'bad' }]);
+    expect(events).toEqual([{ ev: 'copied', what: 'code' }, { ev: 'open', id: 'c1' }, { ev: 'error', message: 'bad' }]);
     expect(logs).toEqual(['overlay: not json', 'overlay error: bad']);
   });
 
@@ -79,7 +81,7 @@ describe('OverlayWindow', () => {
     await vi.advanceTimersByTimeAsync(1);
     expect(children).toHaveLength(2);
     await vi.advanceTimersByTimeAsync(0);
-    expect(JSON.parse(children[1]!.lines[0]!)).toEqual({ op: 'reset', title: 'snap 2', messages: [], theme: 'dark' });
+    expect(JSON.parse(children[1]!.lines[0]!)).toEqual(snap(2));
 
     children[1]?.emit('exit', 1);
     await vi.advanceTimersByTimeAsync(2000);

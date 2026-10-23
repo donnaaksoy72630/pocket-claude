@@ -10,7 +10,7 @@ import WebSocket from 'ws';
 import { ClipboardAgent, type AgentState } from './agent.js';
 import { macClipboard, windowsClipboard } from './clipboard.js';
 import { OverlayModel } from './overlay/model.js';
-import { OVERLAY_PS } from './overlay/script.js';
+import { OVERLAY_PS_FILE } from './overlay/script.js';
 import { OverlayWindow } from './overlay/window.js';
 import { windowsScreen } from './screenshot.js';
 
@@ -123,13 +123,14 @@ async function run(): Promise<void> {
   let overlay: { model: OverlayModel; window: OverlayWindow } | undefined;
   const startOverlay = () => {
     if (overlay || !win) return;
-    writeFileSync(files.overlay, OVERLAY_PS);
+    writeFileSync(files.overlay, OVERLAY_PS_FILE);
     const model = new OverlayModel({ window: (op) => void overlay?.window.send(op), request: (body) => agent?.request(body) }, state.overlayTheme);
     const window = new OverlayWindow({
       script: files.overlay,
       snapshot: () => model.snapshot(),
       log,
       onEvent: (e) => {
+        if (e.ev === 'open') return model.open(e.id);
         if (e.ev !== 'theme' || e.theme === state.overlayTheme) return;
         state.overlayTheme = e.theme;
         saveState(state);
