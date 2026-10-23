@@ -135,6 +135,7 @@ async function run(): Promise<void> {
       onEvent: (e) => {
         if (e.ev === 'open') return model.open(e.id);
         if (e.ev === 'send') return model.send(e.chatId, e.text);
+        if (e.ev === 'configure') return model.configure(e.chatId, { model: e.model, effort: e.effort });
         if (e.ev !== 'theme' || e.theme === state.overlayTheme) return;
         state.overlayTheme = e.theme;
         saveState(state);
