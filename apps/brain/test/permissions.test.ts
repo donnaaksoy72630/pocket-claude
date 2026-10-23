@@ -94,6 +94,24 @@ describe('PermissionBroker', () => {
     expect(broker.outstanding()).toHaveLength(0);
   });
 
+  it('takes one allow for computer use as permission for the whole chat', async () => {
+    const { host, requests } = makeHost();
+    const broker = new PermissionBroker(host);
+    const first = broker.decide('s1', 'computer', { action: 'screenshot' }, signal());
+    broker.respond(requests[0]!.requestId, 'allow', 'voice');
+    await first;
+    expect(await broker.decide('s1', 'computer', { action: 'left_click' }, signal())).toMatchObject({ behavior: 'allow' });
+    expect(requests).toHaveLength(1);
+    void broker.decide('s2', 'computer', { action: 'screenshot' }, signal());
+    expect(requests).toHaveLength(2);
+    const once = broker.decide('s1', 'write_file', { path: 'a' }, signal());
+    broker.respond(requests[2]!.requestId, 'allow', 'phone');
+    await once;
+    void broker.decide('s1', 'write_file', { path: 'b' }, signal());
+    expect(requests).toHaveLength(4);
+    broker.denyAll();
+  });
+
   it('remembers network access for the chat per host, not for the whole network', async () => {
     const { host, requests } = makeHost();
     const broker = new PermissionBroker(host);

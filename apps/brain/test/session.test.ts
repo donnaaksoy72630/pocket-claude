@@ -59,7 +59,7 @@ const metas: SessionMeta[] = [];
 function host(over: Partial<Host> = {}): Host {
   return {
     executorFor: () => ({ id: undefined, online: false, info: null, root: undefined, call: async () => ({ content: '', isError: true }) }),
-    pcFor: () => ({ id: undefined, name: undefined, online: false, capabilities: [], clipboardRead: async () => ({}), clipboardWrite: async () => ({}), screenshot: async () => ({}) }),
+    pcFor: () => ({ id: undefined, name: undefined, online: false, capabilities: [], clipboardRead: async () => ({}), clipboardWrite: async () => ({}), screenshot: async () => ({}), computer: async () => ({}) }),
     chatOnly: () => false,
     userName: () => 'Owner',
     emit: () => {},

@@ -10,6 +10,7 @@ function handle(over: Partial<PcHandle> = {}): PcHandle {
     clipboardRead: async () => ({ items: [{ kind: 'text', text: 'hello' }] }),
     clipboardWrite: async () => ({}),
     screenshot: async () => ({ image: { mime: 'image/jpeg', dataBase64: 'QUJD', width: 1600, height: 900 } }),
+    computer: async () => ({}),
     ...over,
   };
 }

@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { tool, type SdkMcpToolDefinition } from '@anthropic-ai/claude-agent-sdk';
-import { MCP_SERVER_NAME, type ClipboardItem, type ScreenImage } from '@pocket/protocol';
+import { MCP_SERVER_NAME, type ClipboardItem, type ComputerAction, type ComputerResult, type ScreenImage } from '@pocket/protocol';
 import { z } from 'zod';
 
 /** The user's own Windows computer with PocketClipboard on it, as a chat sees it; resolved on every use. */
@@ -12,6 +12,8 @@ export interface PcHandle {
   clipboardRead(): Promise<{ items?: ClipboardItem[]; error?: string }>;
   clipboardWrite(item: ClipboardItem): Promise<{ error?: string }>;
   screenshot(): Promise<{ image?: ScreenImage; error?: string }>;
+  /** One computer-use step, in physical desktop pixels (the 'computer' capability). */
+  computer(action: ComputerAction): Promise<ComputerResult & { error?: string }>;
 }
 
 export const PC_TOOL_NAMES = ['pc_clipboard_read', 'pc_clipboard_write', 'pc_screenshot'] as const;

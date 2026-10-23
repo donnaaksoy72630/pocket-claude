@@ -6,6 +6,9 @@ export const PERMISSION_TIMEOUT_MS = 10 * 60_000;
 /** The pseudo tool Claude Code asks about when a sandboxed command wants a host outside the allow list; input `{ host }`. */
 export const SANDBOX_NETWORK_TOOL = 'SandboxNetworkAccess';
 
+/** Tools whose single "allow" covers the whole chat: computer use asks once, not at every click. */
+export const ALLOWED_FOR_CHAT = new Set(['computer']);
+
 /** What "allow for this chat" remembers: the tool, or for network access just that one host. */
 export function allowKey(toolName: string, input: Record<string, unknown>): string {
   return toolName === SANDBOX_NETWORK_TOOL && typeof input.host === 'string' ? `${toolName}:${input.host.toLowerCase()}` : toolName;
@@ -63,7 +66,7 @@ export class PermissionBroker {
       return { behavior: 'deny', message: decision === 'timeout' ? 'The user did not answer in time.' : 'Cancelled.' };
     }
     if (decision === 'deny') return { behavior: 'deny', message: 'The user denied this action.' };
-    if (decision === 'allow_session') {
+    if (decision === 'allow_session' || (decision === 'allow' && ALLOWED_FOR_CHAT.has(toolName))) {
       const set = this.sessionAllow.get(sessionId) ?? new Set<string>();
       set.add(allowKey(toolName, input));
       this.sessionAllow.set(sessionId, set);

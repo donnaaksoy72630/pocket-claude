@@ -2,6 +2,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import type { InnerMessage, InnerMessageBody, PairingCode } from '@pocket/protocol';
+import type { PcHandle } from '../src/pc-tools.js';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 const home = mkdtempSync(join(tmpdir(), 'pocket-users-'));
@@ -166,6 +167,14 @@ describe('people', () => {
     laptop.send({ type: 'screen.image', payload: { requestId: 's1', image: { mime: 'image/jpeg', dataBase64: 'AAAA', width: 16, height: 9 } } });
     expect((await shot).payload).toEqual({ requestId: 's1', deviceId: laptop.deviceId, image: { mime: 'image/jpeg', dataBase64: 'AAAA', width: 16, height: 9 } });
     expect((await owner.ask({ type: 'screen.get', payload: { requestId: 's2', deviceId: laptop.deviceId } }, 'screen.result')).payload.error).toMatch(/not paired/);
+
+    // Computer use from Masha's chat goes to her laptop and the answer comes back to the tool.
+    const pcOfChat = (brain as unknown as { pcHandle(id: string): PcHandle }).pcHandle(mashaSession);
+    const step = pcOfChat.computer({ action: 'click', x: 10, y: 20, button: 'left', count: 1 });
+    const act = await laptop.next('computer.act');
+    expect(act.payload.action).toEqual({ action: 'click', x: 10, y: 20, button: 'left', count: 1 });
+    laptop.send({ type: 'computer.done', payload: { requestId: act.payload.requestId, cursor: { x: 10, y: 20 } } });
+    expect(await step).toEqual({ requestId: act.payload.requestId, cursor: { x: 10, y: 20 } });
     expect((await owner.ask({ type: 'computers.get', payload: {} }, 'computers.result')).payload.computers).toEqual([]);
     expect((await owner.ask({ type: 'computer.select', payload: { deviceId: pc.deviceId } }, 'error')).payload.code).toBe('unknown_computer');
     expect((await owner.ask({ type: 'clipboard.get', payload: { requestId: 'r1', deviceId: pc.deviceId } }, 'clipboard.result')).payload.error).toMatch(/not paired/);

@@ -16,6 +16,8 @@ import {
   safetyNumber,
   sealPairReply,
   type ClipboardItem,
+  type ComputerAction,
+  type ComputerResult,
   type Identity,
   TOOL_NAMES,
   type InnerMessageBody,
@@ -36,6 +38,7 @@ import { DeviceLink, type IncomingMessage, type WebSocketCtor } from '@pocket/tr
 import { WebSocket as NodeWebSocket } from 'ws';
 import { isAllowedByRules, validateRule } from './allowlist.js';
 import { FALLBACK_MODELS } from './chat-tools.js';
+import { COMPUTER_TOOL, computerConsent } from './computer-tools.js';
 import { toDisplayCall } from './claude-tools.js';
 import { ExecutorBridge } from './executor.js';
 import { log } from './log.js';
@@ -49,9 +52,16 @@ const MAX_LIVE_SESSIONS = 2;
 const DELTA_FLUSH_MS = 60;
 const CLIPBOARD_TIMEOUT_MS = 60_000;
 
-type PcRequest = Extract<InnerMessageBody, { type: 'clipboard.read' | 'clipboard.write' | 'screen.capture' }>;
-type PcReply = Extract<InnerMessageBody, { type: 'clipboard.data' | 'clipboard.done' | 'screen.image' }>;
-type PcAnswer = { items?: ClipboardItem[]; image?: ScreenImage; error?: string };
+/** A computer-use step may first wait for PocketClipboard to start its helper; typing and holding take longer still. */
+function computerTimeout(action: ComputerAction): number {
+  if (action.action === 'type') return 90_000 + action.text.length * 25;
+  if (action.action === 'key') return 90_000 + (action.holdMs ?? 0);
+  return 90_000;
+}
+
+type PcRequest = Extract<InnerMessageBody, { type: 'clipboard.read' | 'clipboard.write' | 'screen.capture' | 'computer.act' }>;
+type PcReply = Extract<InnerMessageBody, { type: 'clipboard.data' | 'clipboard.done' | 'screen.image' | 'computer.done' }>;
+type PcAnswer = ComputerResult & { items?: ClipboardItem[]; image?: ScreenImage; error?: string };
 /** The only client traffic a computer with the 'overlay' capability gets to see: the chat itself, nothing it could act on. */
 const OVERLAY_MIRRORED = new Set<MessageType>(['session.event', 'session.created', 'session.updated', 'session.deleted']);
 
@@ -379,9 +389,9 @@ export class Brain {
 
   private pcHandle(sessionId: string): PcHandle {
     const id = () => this.pcForSession(sessionId);
-    const ask = (body: PcRequest) => {
+    const ask = (body: PcRequest, timeoutMs?: number) => {
       const deviceId = id();
-      return deviceId ? this.askPc(deviceId, body) : Promise.resolve({ error: 'No computer' });
+      return deviceId ? this.askPc(deviceId, body, timeoutMs) : Promise.resolve({ error: 'No computer' });
     };
     const self = this;
     return {
@@ -401,6 +411,7 @@ export class Brain {
       clipboardRead: () => ask({ type: 'clipboard.read', payload: { requestId: randomUUID() } }),
       clipboardWrite: (item) => ask({ type: 'clipboard.write', payload: { requestId: randomUUID(), item } }),
       screenshot: () => ask({ type: 'screen.capture', payload: { requestId: randomUUID() } }),
+      computer: (action) => ask({ type: 'computer.act', payload: { requestId: randomUUID(), action } }, computerTimeout(action)),
     };
   }
 
@@ -481,7 +492,7 @@ export class Brain {
   }
 
   addAllowRule(rule: string): string | null {
-    const error = validateRule(rule, TOOL_NAMES);
+    const error = validateRule(rule, [...TOOL_NAMES, COMPUTER_TOOL]);
     if (error) return error;
     if (!this.state.allowlist.includes(rule)) this.state.allowlist = [...this.state.allowlist, rule];
     this.persistNow();
@@ -570,7 +581,8 @@ export class Brain {
           return this.executor.handleOutput(from, message.payload);
         case 'clipboard.data':
         case 'clipboard.done':
-        case 'screen.image': {
+        case 'screen.image':
+        case 'computer.done': {
           const req = this.pcRequests.get(message.payload.requestId);
           if (!req || req.deviceId !== from) return;
           clearTimeout(req.timer);
@@ -855,7 +867,9 @@ export class Brain {
       },
       canUseTool: async (sessionId: string, tool: string, input: Record<string, unknown>, signal: AbortSignal) => {
         const shown = toDisplayCall(tool.replace(/^mcp__pocket__/, ''), input);
-        const result = await this.permissions.decide(sessionId, shown.name, shown.input as Record<string, unknown>, signal);
+        // Computer use is asked about once per chat, so the question is about the chat, not this one click.
+        const asked = shown.name === COMPUTER_TOOL ? { description: computerConsent(this.pcHandle(sessionId).name), action: input.action } : shown.input;
+        const result = await this.permissions.decide(sessionId, shown.name, asked as Record<string, unknown>, signal);
         return result.behavior === 'allow' ? { ...result, updatedInput: input } : result;
       },
       claudeOptions: (): Partial<Options> => ({

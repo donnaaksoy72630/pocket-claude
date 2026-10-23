@@ -140,6 +140,11 @@ export class ClipboardAgent {
       case 'computer.act': {
         const { requestId, action } = message.payload;
         if (!this.opts.computer) return this.send({ type: 'computer.done', payload: { requestId, error: 'This computer cannot be controlled: PocketClipboard runs here without computer use.' } });
+        if (action.action === 'release') {
+          // Not queued behind the step it is meant to stop.
+          this.opts.computer.release();
+          return this.send({ type: 'computer.done', payload: { requestId, text: 'Let go of all keys and mouse buttons.' } });
+        }
         try {
           const result = await this.opts.computer.act(action);
           // Only the kind of step: typed text and window titles stay off the log.

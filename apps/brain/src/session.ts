@@ -25,6 +25,7 @@ import {
   type Subagent,
 } from '@pocket/protocol';
 import { CHAT_ALLOWED_TOOLS, chatTools, chatToolsPrompt, FALLBACK_MODELS, type ChatControl } from './chat-tools.js';
+import { computerTools, computerToolsPrompt, ComputerState } from './computer-tools.js';
 import { agentDefinitions, AUTO_ALLOWED_TOOLS, BUILTIN_TOOLS, CLAUDE_TOOLS, claudeTool, readLocalSkillFile, toDisplayCall, TOOL_ALIASES } from './claude-tools.js';
 import type { ExecutorHandle } from './executor.js';
 import { log } from './log.js';
@@ -63,6 +64,7 @@ export const VOICE_NOTE = [
   'If they ask for a command, code or any text to paste, put the exact text on their computer with pc_clipboard_write and say it is on the clipboard, ready for Ctrl+V.',
   'If they ask to look at the screen, take a screenshot with pc_screenshot and tell them what matters. If they ask what they copied, read it with pc_clipboard_read and summarise it.',
   'If they ask to switch the model or how hard you think, do it with chat_configure and say in one sentence what changed.',
+  'If they ask you to do something on their computer (open a program or a site, type into a window, click something), do it with the computer tool and say in a few words what you are doing.',
   'Before a tool that takes a while, say one short sentence about what you are doing, so the line is not silent.',
   'Do not read out file paths, URLs, hashes or long numbers: describe them in words.',
   'After any action, say in one sentence what you did and what you saw.]',
@@ -88,6 +90,7 @@ function macSystemPrompt(cwd: string, projectInstructions: string | null, pcName
     place.own ? ownFolderPrompt(cwd) : '',
     place.sandboxed ? SANDBOX_PROMPT : '',
     pcToolsPrompt(pcName),
+    computerToolsPrompt(pcName),
     chatToolsPrompt(),
     projectInstructions ? `# Project instructions (CLAUDE.md)\n${projectInstructions}` : '',
   ]
@@ -101,6 +104,7 @@ function chatSystemPrompt(userName: string, pcName: string | undefined): string 
     `You are talking to ${userName} from their phone or Telegram. There is no project here and you have no file or shell access anywhere: never try to read, write or run anything. Your working directory is an empty scratch folder; ignore it.`,
     'Answer questions, write code and commands in the chat. Anything meant for pasting goes in one code block, because the user copies a block with one tap. Keep replies short and lead with the outcome, in the user\'s language.',
     pcToolsPrompt(pcName),
+    computerToolsPrompt(pcName),
     chatToolsPrompt(),
   ].join('\n\n');
 }
@@ -136,6 +140,7 @@ function systemPromptFor(workspaces: string[], projectInstructions: string | nul
     'Bash runs Windows PowerShell, not a POSIX shell: use PowerShell syntax and Windows paths. Use run_in_background for servers and watchers. Read a file before editing it.',
     'The user is chatting from a phone or a small VS Code panel: keep replies short and lead with the outcome.',
     pcToolsPrompt(pcName),
+    computerToolsPrompt(pcName),
     chatToolsPrompt(),
     projectInstructions ? `# Project instructions (CLAUDE.md on the Windows workspace)\n${projectInstructions}` : '',
   ]
@@ -194,6 +199,8 @@ export class Session {
   private restartAfterTurn = false;
   /** Model/effort Claude switched to from inside a turn; the live process takes it when the turn ends. */
   private pendingConfig: { model?: string | null; effort?: Effort | null } | null = null;
+  /** Which screenshot Claude's computer-use coordinates refer to. */
+  private readonly computer = new ComputerState();
   /** Deleted chats must not resurface through late state updates from a stopping process. */
   private destroyed = false;
   private streamedText = false;
@@ -279,6 +286,7 @@ export class Session {
     if (project === undefined && executorId !== this.meta.executorId && this.meta.project) project = null;
     const projectChanged = project !== undefined && (project ?? undefined) !== this.meta.project;
     this.setMeta({ executorId, ...(project !== undefined ? { project: project ?? undefined } : {}) });
+    this.computer.reset();
     if (!this.q || (this.startedOn === executorId && !projectChanged)) return;
     if (this.meta.state === 'idle' && !this.busy) this.stop();
     else this.restartAfterTurn = true;
@@ -388,6 +396,8 @@ export class Session {
   }
 
   async interrupt(): Promise<void> {
+    // Stop also means hands off the computer: a long text being typed stops and held keys are let go.
+    if (this.computer.busy > 0) void this.host.pcFor(this.id).computer({ action: 'release' }).catch(() => {});
     if (!this.q) return;
     try {
       await this.q.interrupt();
@@ -532,7 +542,7 @@ export class Session {
 
   /** The pc_* and chat_* tools: what Mac and chat-only sessions get. */
   private pcServer() {
-    return createSdkMcpServer({ name: MCP_SERVER_NAME, version: '0.1.0', alwaysLoad: true, tools: [...pcTools(() => this.host.pcFor(this.id)), ...chatTools(() => this.chatControl())] });
+    return createSdkMcpServer({ name: MCP_SERVER_NAME, version: '0.1.0', alwaysLoad: true, tools: [...pcTools(() => this.host.pcFor(this.id)), ...computerTools(() => this.host.pcFor(this.id), this.computer), ...chatTools(() => this.chatControl())] });
   }
 
   private chatControl(): ChatControl {
@@ -554,7 +564,7 @@ export class Session {
       name: MCP_SERVER_NAME,
       version: '0.1.0',
       alwaysLoad: true,
-      tools: [...pcTools(() => this.host.pcFor(this.id)), ...chatTools(() => this.chatControl()), ...CLAUDE_TOOLS.map((t) =>
+      tools: [...pcTools(() => this.host.pcFor(this.id)), ...computerTools(() => this.host.pcFor(this.id), this.computer), ...chatTools(() => this.chatControl()), ...CLAUDE_TOOLS.map((t) =>
         tool(t.name, t.description, t.shape, async (args) => {
           const toolUseId = this.pendingToolUseIds.get(t.name)?.shift();
           const input = unscratchPaths(args as Record<string, unknown>, scratch);

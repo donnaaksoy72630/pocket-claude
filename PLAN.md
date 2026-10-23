@@ -23,7 +23,7 @@
 | 1 | ✅ 1. Модель и мышление голосом | Инструменты `chat_models` и `chat_configure`, Fable в списках, подсказки для чата и звонка, тесты | `brain: Claude switches its own model and effort` |
 | 2 | ✅ 2. Песочница чата на Mac | Папка на чат, память `NOTES.md`, вложения в папке чата, Seatbelt-песочница для Bash, разрешения на сеть по хостам, тесты | `brain: a sandbox folder per Mac chat` |
 | 3 | ✅ 3а. PocketClipboard: руки | Протокол `computer.act`/`computer.done`, PowerShell + C# хост: экран, мышь, клавиатура, окна, запуск программ; проверка синтаксиса через pwsh | `clipboard-agent: computer control host` |
-| 4 | 3б. Brain: инструмент `computer` | Инструмент в формате computer use, пересчёт координат, авто-скриншот после действия, одно разрешение на чат, подсказки, стоп, тесты | `brain: computer use tool` |
+| 4 | ✅ 3б. Brain: инструмент `computer` | Инструмент в формате computer use, пересчёт координат, авто-скриншот после действия, одно разрешение на чат, подсказки, стоп, тесты | `brain: computer use tool` |
 | 5 | 4. Подписи, документация, PR | Понятные подписи действий в приложении, Telegram и звонке; README, PLAN, чек-лист приёмки; отчёт в PR | `docs: wave 3` |
 
 Если этап заканчивается раньше, следующий начинается сразу. Порядок не меняется: каждый этап можно принимать отдельно.
@@ -68,7 +68,7 @@
   - Запуск: `Start-Process` для программы, файла или URL (`powershell`, `chrome https://…`, `notepad`, `ms-settings:`).
 - Проверка: vitest на разбор ответов и протокол; синтаксический разбор скрипта через `pwsh` на Linux (ставлю в песочнице); живая проверка — на Windows при приёмке.
 
-### Этап 3б — инструмент `computer` в brain (`apps/brain`)
+### ✅ Этап 3б — инструмент `computer` в brain (`apps/brain`)
 
 - Инструмент `computer` в формате Anthropic computer use. Действия:
   - `screenshot`, `zoom`, `cursor_position`, `wait`;
@@ -76,7 +76,7 @@
   - `type`, `key`, `hold_key`;
   - а ещё `list_windows`, `focus_window`, `minimize_window`, `maximize_window`, `restore_window`, `close_window`, `open`, `switch_display`.
 - Координаты Claude даёт в пикселях последнего скриншота, brain пересчитывает их в реальные по геометрии монитора. После каждого действия через ~0,5 с приходит свежий скриншот, и Claude видит результат.
-- Разрешение: при первом действии в чате спрашивается «Claude управляет компьютером X в этом чате?» (на телефоне, в Telegram, голосом «да»), дальше без вопросов до перезапуска brain. Навсегда разрешить: `pocket-claude allow computer`.
+- Разрешение: при первом действии в чате спрашивается «Claude управляет компьютером X в этом чате?» (на телефоне, в Telegram, голосом «да»), дальше без вопросов до перезапуска brain. Навсегда разрешить: `pocket-claude allow add computer`.
 - Подсказка:
   - сначала скриншот;
   - сочетания клавиш лучше кликов;
