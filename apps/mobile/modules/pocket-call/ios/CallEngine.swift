@@ -90,7 +90,9 @@ final class CallEngine: NSObject {
   private var engineObserver: NSObjectProtocol?
   private var engineGeneration = 0
   private var echoCancellation = false
-  private var restarts: [TimeInterval] = []
+  /// Rebuilds in a row, each soon after the one before it, and when the last one happened.
+  private var restartChain = 0
+  private var rebuiltAt: TimeInterval = 0
   private var restartPending = false
   private var route = ""
   /// What the players take: mono float at the synthesizer's usual rate. The mixer converts it for the hardware.
@@ -205,7 +207,8 @@ final class CallEngine: NSObject {
     recognitionFailures = 0
     quickEnds = 0
     nextRecognitionAt = 0
-    restarts = []
+    restartChain = 0
+    rebuiltAt = 0
     do {
       try configureSession(speaker: config.speaker)
       try AVAudioSession.sharedInstance().setActive(true)
@@ -365,15 +368,15 @@ final class CallEngine: NSObject {
   /// that keeps coming back cannot spin.
   private func scheduleRestart(_ reason: String) {
     guard !restartPending else { return }
-    let now = uptime()
-    restarts = restarts.filter { now - $0 < 30 }
-    guard restarts.count < 6 else {
+    // The last rebuild ran for a while: this is a new change (a route, the speaker button), not a loop.
+    if uptime() - rebuiltAt > 5 { restartChain = 0 }
+    guard restartChain < 6 else {
       note("audio keeps reconfiguring, giving up (\(reason))")
       emit(["type": "error", "code": "audio", "message": "The call audio keeps failing. Hang up and call again.", "fatal": true])
       return
     }
-    let delay = restarts.isEmpty ? 0 : min(0.25 * pow(2, Double(restarts.count - 1)), 4)
-    restarts.append(now)
+    let delay = restartChain == 0 ? 0 : min(0.25 * pow(2, Double(restartChain - 1)), 4)
+    restartChain += 1
     restartPending = true
     queue.asyncAfter(deadline: .now() + delay) { [weak self] in
       guard let self else { return }
@@ -396,7 +399,9 @@ final class CallEngine: NSObject {
       emit(["type": "error", "code": "audio", "message": error.localizedDescription, "fatal": true])
       return
     }
+    rebuiltAt = uptime()
     noiseFloor = -60
+
     reportRoute()
     note("audio restarted (\(reason)), route \(route)")
   }
