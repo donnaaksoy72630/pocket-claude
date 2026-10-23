@@ -391,6 +391,24 @@ final class CallEngine: NSObject {
     commit()
     clearPrebuffer()
     setUserSpeaking(false)
+    // Apple's guidance for a configuration change: start the same engine again. Building a new one turns voice
+    // processing on afresh, which reconfigures the hardware and stops it again — a loop that never hears anything.
+    if let engine {
+      engine.prepare()
+      do {
+        try engine.start()
+        speechPlayer?.play()
+        rebuiltAt = uptime()
+        noiseFloor = -60
+        reportRoute()
+        reschedule()
+        updateChime()
+        note("audio resumed (\(reason)), route \(route)")
+        return
+      } catch {
+        note("audio resume failed, rebuilding: \(error.localizedDescription)")
+      }
+    }
     teardownEngine()
     do {
       try buildEngine()
