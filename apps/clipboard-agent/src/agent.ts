@@ -87,7 +87,7 @@ export class ClipboardAgent {
     if (this.link.isOnline(this.state.brainDeviceId)) this.sendStatus();
   }
 
-  /** What the overlay asks of the brain: the session list, history, and messages typed in the window. */
+  /** What the overlay asks of the brain: the session list, history, models, messages typed in the window and model changes. */
   request(body: InnerMessageBody): void {
     this.send(body);
   }
@@ -176,6 +176,7 @@ export class ClipboardAgent {
       case 'session.deleted':
       case 'session.list.result':
       case 'session.history.result':
+      case 'models.result':
       // The brain answers only the overlay's own messages with errors (a chat that is gone, Claude failing to start).
       case 'error':
         this.overlay?.handle(message);
