@@ -10,6 +10,7 @@ import {
   oralPart,
   parseYesNo,
   permissionQuestion,
+  recentUserTexts,
   resolveCallLanguage,
   speakable,
   VoiceCall,
@@ -57,6 +58,21 @@ describe('voice helpers', () => {
     expect(callLanguage(undefined)).toBe('en-US');
     expect(resolveCallLanguage('auto', ['ru-US', 'en-US'])).toBe('ru-RU');
     expect(resolveCallLanguage('en-US', ['ru-RU'])).toBe('en-US');
+  });
+
+  it('calls in Russian when the user writes Russian or has a Russian keyboard, whatever the phone language', () => {
+    expect(resolveCallLanguage('auto', ['en-US'])).toBe('en-US');
+    expect(resolveCallLanguage('auto', ['en-US'], { keyboards: ['en-US', 'emoji', 'ru-RU'] })).toBe('ru-RU');
+    expect(resolveCallLanguage('auto', ['en-US', 'ru-RU'])).toBe('ru-RU');
+    expect(resolveCallLanguage('auto', ['en-GB'], { texts: ['Почини баг в src/app.ts и запусти npm test'] })).toBe('ru-RU');
+    expect(resolveCallLanguage('auto', ['en-GB'], { texts: ['fix the bug in src/app.ts and run the tests', 'ок'] })).toBe('en-GB');
+    expect(resolveCallLanguage('en-US', ['ru-RU'], { keyboards: ['ru-RU'], texts: ['привет, как дела у проекта'] })).toBe('en-US');
+  });
+
+  it('collects what the user typed lately in each chat', () => {
+    const threads = { a: [user('раз'), reply('a1', 'ответ'), user('два')], b: [user('three')], c: undefined };
+    expect(recentUserTexts(threads)).toEqual(['два', 'раз', 'three']);
+    expect(recentUserTexts(threads, 1)).toEqual(['два', 'three']);
   });
 
   it('waits longer after "и" and less after a full stop before ending an utterance', () => {

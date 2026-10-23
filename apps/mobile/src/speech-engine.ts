@@ -1,8 +1,9 @@
 import { setAudioModeAsync } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import { ExpoSpeechRecognitionModule, type ExpoSpeechRecognitionResultEvent } from 'expo-speech-recognition';
+import type { ChatItem } from '@pocket/client-core';
 import { PocketCall, type PocketCallModule } from '../modules/pocket-call';
-import { endpointDelay, type CaptureMode, type EngineEvent, type EngineInfo, type EngineStartOptions, type SpeechEngine } from './voice';
+import { endpointDelay, recentUserTexts, resolveCallLanguage, type CaptureMode, type EngineEvent, type EngineInfo, type EngineStartOptions, type SpeechEngine } from './voice';
 
 type Listener = (event: EngineEvent) => void;
 
@@ -332,6 +333,23 @@ export async function listVoices(language: string): Promise<VoiceOption[]> {
     .filter((v) => v.language.toLowerCase().startsWith(prefix))
     .map((v) => ({ identifier: v.identifier, name: v.name, quality: v.quality === Speech.VoiceQuality.Enhanced ? ('enhanced' as const) : ('default' as const) }))
     .sort((a, b) => (a.quality === b.quality ? 0 : a.quality === 'enhanced' ? -1 : 1));
+}
+
+/** Languages of the keyboards added on the phone, e.g. ru-RU; iPhone only. */
+export async function keyboardLanguages(): Promise<string[]> {
+  if (!PocketCall) return [];
+  try {
+    return await PocketCall.keyboardLanguages();
+  } catch {
+    // A build from before keyboardLanguages existed.
+    return [];
+  }
+}
+
+/** The language a call uses now: the one picked in Settings, or on "auto" what the chats and the phone suggest. */
+export async function callLanguageFor(choice: string, threads: Readonly<Record<string, readonly ChatItem[] | undefined>>): Promise<string> {
+  const keyboards = choice === 'auto' ? await keyboardLanguages() : [];
+  return resolveCallLanguage(choice, preferredLanguages(), { texts: recentUserTexts(threads), keyboards });
 }
 
 /** The phone's preferred languages, most preferred first. */

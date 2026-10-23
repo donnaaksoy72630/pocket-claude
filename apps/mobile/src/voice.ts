@@ -127,10 +127,51 @@ export function callLanguage(locale: string | undefined): string {
   return REGIONS[lang] ?? `${lang}-${lang.toUpperCase()}`;
 }
 
-/** The language picked in Settings, or the phone's first preferred language. */
-export function resolveCallLanguage(choice: string, preferred: readonly string[]): string {
+/** What tells that the user speaks Russian although the phone may be in English. */
+export interface LanguageHints {
+  /** What the user typed in the chats lately (recentUserTexts). */
+  texts?: readonly string[];
+  /** Languages of the phone's keyboards. */
+  keyboards?: readonly string[];
+}
+
+/**
+ * The language picked in Settings. "auto" is Russian when the user writes Russian in the chats, or the phone has a
+ * Russian keyboard or Russian among its languages (many Russian speakers keep the iPhone in English); otherwise the
+ * phone's first language.
+ */
+export function resolveCallLanguage(choice: string, preferred: readonly string[], hints: LanguageHints = {}): string {
   if (choice && choice !== 'auto') return choice;
-  return callLanguage(preferred[0]);
+  const russian = [...preferred, ...(hints.keyboards ?? [])].some((l) => callLang(l) === 'ru') || writesRussian(hints.texts ?? []);
+  return russian ? 'ru-RU' : callLanguage(preferred[0]);
+}
+
+/** Russian makes up a fair share of what the user typed: code, paths and names are Latin even in Russian chats. */
+export function writesRussian(texts: readonly string[]): boolean {
+  let cyrillic = 0;
+  let latin = 0;
+  for (const text of texts) {
+    cyrillic += text.match(/[а-яё]/gi)?.length ?? 0;
+    latin += text.match(/[a-z]/gi)?.length ?? 0;
+  }
+  return cyrillic >= 12 && cyrillic * 2 >= latin;
+}
+
+/** The user's own messages, the last few of each chat. */
+export function recentUserTexts(threads: Readonly<Record<string, readonly ChatItem[] | undefined>>, perChat = 10): string[] {
+  const texts: string[] = [];
+  for (const items of Object.values(threads)) {
+    if (!items) continue;
+    let taken = 0;
+    for (let i = items.length - 1; i >= 0 && taken < perChat; i--) {
+      const item = items[i]!;
+      if (item.type === 'user' && item.text) {
+        texts.push(item.text);
+        taken++;
+      }
+    }
+  }
+  return texts;
 }
 
 export type CallLang = 'ru' | 'en';

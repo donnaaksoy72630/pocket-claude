@@ -73,6 +73,8 @@ declare class PocketCallModule extends NativeModule<PocketCallEvents> {
   getVoices(language: string): Promise<NativeVoice[]>;
   getPowerState(): PowerState;
   preferredLanguages(): string[];
+  /** Languages of the keyboards added on the phone (UITextInputMode), e.g. ru-RU. */
+  keyboardLanguages(): Promise<string[]>;
 }
 
 export type { PocketCallModule };

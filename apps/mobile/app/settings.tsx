@@ -3,7 +3,7 @@ import * as Speech from 'expo-speech';
 import * as Haptics from '../src/haptics';
 import { useRouter } from 'expo-router';
 import type { ReactNode } from 'react';
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Linking, Pressable, ScrollView, Share, StyleSheet, Switch, Text, View } from 'react-native';
 import { alert } from '../src/alert';
 import { setCallPrefs, useCallPrefs } from '../src/call-prefs';
@@ -12,10 +12,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import type { IconName } from '../src/format';
 import { useLock } from '../src/lock';
 import { useChatState, useSession } from '../src/session';
-import { listVoices, nativeCalls, preferredLanguages } from '../src/speech-engine';
+import { keyboardLanguages, listVoices, nativeCalls, preferredLanguages } from '../src/speech-engine';
 import { openTelegramLink, shareViaTelegram } from '../src/telegram';
 import { colors, mono } from '../src/theme';
-import { resolveCallLanguage } from '../src/voice';
+import { recentUserTexts, resolveCallLanguage } from '../src/voice';
 
 const CALL_LANGUAGES = [
   { value: 'auto', label: 'Auto' },
@@ -120,7 +120,15 @@ export default function SettingsScreen() {
     ]);
 
   const callPrefs = useCallPrefs();
-  const callLanguage = resolveCallLanguage(callPrefs.language, preferredLanguages());
+  const [keyboards, setKeyboards] = useState<string[]>([]);
+  useEffect(() => {
+    void keyboardLanguages().then(setKeyboards);
+  }, []);
+  // As the call will pick it: on "auto", Russian chats or a Russian keyboard mean a Russian call.
+  const callLanguage = useMemo(
+    () => resolveCallLanguage(callPrefs.language, preferredLanguages(), { texts: recentUserTexts(state.threads), keyboards }),
+    [callPrefs.language, state.threads, keyboards],
+  );
   const [voiceName, setVoiceName] = useState<string | null>(null);
   useEffect(() => {
     let live = true;
