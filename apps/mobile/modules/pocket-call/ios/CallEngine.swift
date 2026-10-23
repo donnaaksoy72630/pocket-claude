@@ -112,6 +112,8 @@ final class CallEngine: NSObject {
   private var recognition: Recognition?
   private var recognitionToken = 0
   private var recognitionFailures = 0
+  /// Requests in a row that the recognizer ended within a second, without a word.
+  private var quickEnds = 0
   private var nextRecognitionAt: TimeInterval = 0
   /// The last utterance handed to JS and when the voice in it stopped: for the time to the reply's first sound.
   private var lastUtterance: (sent: TimeInterval, voiceEnded: TimeInterval)?
@@ -201,6 +203,7 @@ final class CallEngine: NSObject {
     onDevice = config.onDevice && recognizer.supportsOnDeviceRecognition
     voice = CallVoices.best(language: config.language, chosen: config.voice)
     recognitionFailures = 0
+    quickEnds = 0
     nextRecognitionAt = 0
     restarts = []
     do {
@@ -574,7 +577,11 @@ final class CallEngine: NSObject {
       current.heard = text
       current.changedAt = now
       recognitionFailures = 0
+      quickEnds = 0
       emit(["type": "partial", "text": text])
+    }
+    if (isFinal || error != nil) && current.heard.isEmpty && now - current.startedAt < 1 {
+      endedAtOnce(now)
     }
     if isFinal || (error != nil && !current.heard.isEmpty) {
       commit()
@@ -582,6 +589,14 @@ final class CallEngine: NSObject {
       dropRecognition()
       recognitionFailed(error as NSError, now: now)
     }
+  }
+
+  /// The recognizer ended a request right after it began, without a word: each next request waits longer, so a
+  /// recognizer that keeps doing that is not restarted on every buffer.
+  private func endedAtOnce(_ now: TimeInterval) {
+    quickEnds += 1
+    nextRecognitionAt = max(nextRecognitionAt, now + min(0.5 * pow(2, Double(quickEnds - 1)), 8))
+    if quickEnds == 4 { note("speech recognition keeps ending at once") }
   }
 
   /// The utterance is over: say when the pause is long enough for what was said, like endpointDelay in src/voice.ts.
@@ -671,7 +686,8 @@ final class CallEngine: NSObject {
   /// Waits longer after each failure in a row, so a broken recognizer is not restarted on every word.
   private func failRecognition(code: String, message: String, now: TimeInterval) {
     recognitionFailures += 1
-    nextRecognitionAt = now + min(0.5 * pow(2, Double(recognitionFailures - 1)), 8)
+    nextRecognitionAt = max(nextRecognitionAt, now + min(0.5 * pow(2, Double(recognitionFailures - 1)), 8))
+
     emit(["type": "recognitionError", "code": code, "message": message])
     if recognitionFailures == 4 {
       emit(["type": "error", "code": "recognition", "message": "Speech recognition keeps failing: \(message)", "fatal": false])
