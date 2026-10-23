@@ -79,7 +79,10 @@ describe('voice helpers', () => {
   it('waits longer after "и" and less after a full stop before ending an utterance', () => {
     const hold = holdWords('ru');
     expect(endpointDelay('открой браузер', 1100, hold)).toBe(1100);
-    expect(endpointDelay('открой браузер.', 1100, hold)).toBe(700);
+    expect(endpointDelay('открой браузер.', 1100, hold)).toBe(800);
+    expect(endpointDelay('Привет, ты меня слышишь?', 1100, hold)).toBe(800);
+    expect(endpointDelay('и ещё', 1100, hold)).toBe(1800);
+    expect(endpointDelay('ну', 1100, hold)).toBe(1800);
     expect(endpointDelay('открой браузер и', 1100, hold)).toBe(1800);
     expect(endpointDelay('Сделай так, чтобы', 1100, hold)).toBe(1800);
   });
@@ -223,12 +226,13 @@ describe('VoiceCall', () => {
     expect(sent).toEqual(['сделай скриншот']);
     expect(call.snapshot().phase).toBe('thinking');
     vi.advanceTimersByTime(1000);
-    expect(engine.thinking).toEqual([true]);
+    // A quick answer needs no "секунду" (see the test below).
+    expect(engine.thinking).toEqual([]);
 
     const asked = user('сделай скриншот');
     call.onThread([...history, asked, reply('a1', 'Сейчас посмотрю. Делаю', true)], 'running');
     expect(engine.texts).toEqual(['Сейчас посмотрю.']);
-    expect(engine.thinking).toEqual([true, false]);
+    expect(engine.thinking).toEqual([]);
     engine.begin();
     expect(call.snapshot()).toMatchObject({ phase: 'speaking', said: 'Сейчас посмотрю.' });
     // Echo cancellation: the user may talk over the phone.
@@ -411,6 +415,50 @@ describe('VoiceCall', () => {
     expect(engine.stopped).toBe(0);
     engine.finishSpeaking();
     expect(engine.mode).toBe('listen');
+  });
+
+  it('says "секунду" when Claude is quiet for 4 s, then a soft tone at most every 8 s', async () => {
+    const { engine, call } = setup();
+    await call.start();
+    engine.emit({ type: 'final', text: 'проверь почту' });
+    vi.advanceTimersByTime(3900);
+    expect(engine.texts).toEqual([]);
+    vi.advanceTimersByTime(100);
+    expect(engine.texts).toEqual(['Секунду.']);
+    engine.finishSpeaking();
+    expect(call.snapshot().phase).toBe('thinking');
+    vi.advanceTimersByTime(7000);
+    expect(engine.thinking).toEqual([]);
+    vi.advanceTimersByTime(1000);
+    expect(engine.thinking).toEqual([true]);
+
+    // The answer stops the tone; while a tool runs after it, the next cue is the tone again, 8 s after the last.
+    const asked = user('проверь почту');
+    call.onThread([asked, reply('a1', 'Смотрю.'), tool()], 'running');
+    expect(engine.thinking).toEqual([true, false]);
+    engine.finishSpeaking();
+    vi.advanceTimersByTime(7900);
+    expect(engine.thinking).toEqual([true, false]);
+    vi.advanceTimersByTime(100);
+    expect(engine.thinking).toEqual([true, false, true]);
+    expect(engine.texts.filter((t) => t === 'Секунду.')).toHaveLength(1);
+  });
+
+  it('logs how long the user waited for the first sound of the answer, "секунду" aside', async () => {
+    const { engine, call } = setup();
+    await call.start();
+    engine.emit({ type: 'vad', speaking: true });
+    engine.emit({ type: 'vad', speaking: false });
+    vi.advanceTimersByTime(900);
+    engine.emit({ type: 'final', text: 'который час' });
+    vi.advanceTimersByTime(4000);
+    engine.begin();
+    expect(call.log()).not.toMatch(/first sound/);
+    engine.finishSpeaking();
+    vi.advanceTimersByTime(500);
+    call.onThread([user('который час'), reply('a1', 'Половина пятого.'), result()], 'idle');
+    engine.begin();
+    expect(call.log()).toMatch(/reply: first sound 5400 ms after the user stopped talking, 4500 ms after sending/);
   });
 
   it('offers the phone settings when a permission is off', async () => {

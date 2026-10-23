@@ -191,13 +191,14 @@ export function holdWords(lang: CallLang): string[] {
 }
 
 /**
- * How long a pause ends an utterance: shorter after a full stop the recognizer punctuated, longer after "and",
- * "что" and the like. The native engine applies the same rule (CallEngine.endpointDelay).
+ * How long a pause ends an utterance: 0.8 s after a full stop the recognizer punctuated, `silenceMs` (1.1 s) after
+ * other words, 0.7 s longer after "и", "что", "ещё" and the like. The native engine applies the same rule
+ * (CallEngine.endpointDelay).
  */
 export function endpointDelay(text: string, silenceMs: number, hold: readonly string[]): number {
   const trimmed = text.trim();
   let wait = silenceMs;
-  if (/[.!?…]$/.test(trimmed)) wait = Math.min(wait, 700);
+  if (/[.!?…]$/.test(trimmed)) wait = Math.min(wait, 800);
   const last = words(trimmed).at(-1) ?? '';
   if (hold.includes(last)) wait += 700;
   return wait;
@@ -247,6 +248,7 @@ const PHRASES = {
     allowed: 'Разрешил.',
     denied: 'Отказал.',
     onScreen: 'Ответьте на экране.',
+    wait: 'Секунду.',
     rest: 'Остальное — в чате.',
     code: (name: string | null) => (name ? `Код для ${name} — в чате.` : 'Код — в чате.'),
     inChat: 'Ответ — в чате.',
@@ -258,6 +260,7 @@ const PHRASES = {
     allowed: 'Allowed.',
     denied: 'Denied.',
     onScreen: 'Please answer on the screen.',
+    wait: 'One second.',
     rest: 'The rest is in the chat.',
     code: (name: string | null) => (name ? `The ${name} code is in the chat.` : 'The code is in the chat.'),
     inChat: 'The answer is in the chat.',
@@ -386,8 +389,10 @@ export interface VoiceCallDeps {
 }
 
 const SILENCE_MS = 1100;
-/** Silence after an utterance before the soft "thinking" sound starts. */
-const THINKING_SOUND_AFTER_MS = 900;
+/** Claude has said nothing this long after the user spoke: "секунду" first, a soft tone after that. */
+const THINKING_CUE_AFTER_MS = 4000;
+/** Those cues come at most this often. */
+const THINKING_CUE_EVERY_MS = 8000;
 /** About 40 seconds of speech: a longer spoken answer is cut short with "the rest is in the chat". */
 const MAX_SPOKEN_PER_TURN = 550;
 const LOG_LINES = 150;
@@ -412,6 +417,15 @@ export class VoiceCall {
   private thinkingTimer: ReturnType<typeof setTimeout> | null = null;
   /** A notice about something that passes (recognition trouble, the background): cleared once the user is heard. */
   private passingNotice: string | null = null;
+  private lastCueAt = Number.NEGATIVE_INFINITY;
+  /** "Секунду" was said in this turn: later cues are the tone. */
+  private waitSaid = false;
+  // The time to the first sound of the answer: when the user's voice stopped, when the utterance went out, and the
+  // sentence whose start ends the wait.
+  private voiceEndedAt = Number.NEGATIVE_INFINITY;
+  private sentAt = 0;
+  private firstSoundPending = false;
+  private firstSoundId: string | null = null;
 
   // The chat
   private items: readonly ChatItem[];
@@ -578,6 +592,7 @@ export class VoiceCall {
         break;
       case 'vad':
         this.snap = { ...this.snap, userSpeaking: e.speaking };
+        if (!e.speaking) this.voiceEndedAt = Date.now();
         // Echo or noise opened the recognizer while the phone talks and nothing came of it.
         if (!e.speaking && this.mode === 'watch') this.deps.engine.cancelCapture();
         break;
@@ -588,6 +603,10 @@ export class VoiceCall {
         this.onUtterance(e.text);
         break;
       case 'speechStart':
+        if (e.id === this.firstSoundId) {
+          this.firstSoundId = null;
+          this.noteFirstSound();
+        }
         this.started.add(e.id);
         this.current = this.pending.get(e.id) ?? null;
         if (this.current !== null) this.snap = { ...this.snap, said: this.current };
@@ -675,6 +694,18 @@ export class VoiceCall {
     this.awaitingReply = true;
     this.spokenThisTurn = 0;
     this.turnCapped = false;
+    this.waitSaid = false;
+    this.sentAt = Date.now();
+    this.firstSoundPending = true;
+    this.firstSoundId = null;
+  }
+
+  /** How long the user waited: from the end of their phrase to the first sound of the answer. */
+  private noteFirstSound(): void {
+    const now = Date.now();
+    // The pause that ended the utterance comes right before it went out; an older one belongs to another phrase.
+    const fromVoice = this.voiceEndedAt <= this.sentAt && this.sentAt - this.voiceEndedAt < 5000 ? `${now - this.voiceEndedAt} ms after the user stopped talking, ` : '';
+    this.note(`reply: first sound ${fromVoice}${now - this.sentAt} ms after sending`);
   }
 
   /** Stops the reply being read; the rest of this turn stays in the chat. */
@@ -683,6 +714,8 @@ export class VoiceCall {
     this.skipFrom = this.items.length - 1;
     // The user moved on: the rest of that turn is not waited for either.
     this.awaitingReply = false;
+    this.firstSoundPending = false;
+    this.firstSoundId = null;
     this.deps.engine.stopSpeaking();
     this.pending.clear();
     this.started.clear();
@@ -756,7 +789,7 @@ export class VoiceCall {
     this.say(phrase, true);
   }
 
-  private say(text: string, always: boolean): void {
+  private say(text: string, always: boolean, filler = false): void {
     let sentence = text;
     if (!always) {
       if (this.turnCapped) return;
@@ -767,6 +800,10 @@ export class VoiceCall {
       this.spokenThisTurn += sentence.length;
     }
     const id = `s${++this.seq}`;
+    if (this.firstSoundPending && !filler) {
+      this.firstSoundPending = false;
+      this.firstSoundId = id;
+    }
     this.pending.set(id, sentence);
     this.deps.engine.speak(id, sentence);
   }
@@ -819,17 +856,29 @@ export class VoiceCall {
     }
     if (phase === 'thinking') {
       if (!this.thinkingSound && !this.thinkingTimer) {
-        this.thinkingTimer = setTimeout(() => {
-          this.thinkingTimer = null;
-          if (this.ended || this.phase() !== 'thinking') return;
-          this.thinkingSound = true;
-          this.deps.engine.setThinking(true);
-        }, THINKING_SOUND_AFTER_MS);
+        const wait = Math.max(THINKING_CUE_AFTER_MS, this.lastCueAt + THINKING_CUE_EVERY_MS - Date.now());
+        this.thinkingTimer = setTimeout(() => this.cue(), wait);
       }
     } else {
       this.clearThinking();
     }
     this.emit({ ...this.snap, phase });
+  }
+
+  /** Claude is still quiet: say "секунду" once a turn (no tone on Android), then the engine's soft tone. */
+  private cue(): void {
+    this.thinkingTimer = null;
+    if (this.ended || this.phase() !== 'thinking') return;
+    this.lastCueAt = Date.now();
+    if (!this.waitSaid) {
+      this.waitSaid = true;
+      this.note('still thinking: said "one second"');
+      this.say(PHRASES[this.lang].wait, true, true);
+      this.sync();
+      return;
+    }
+    this.thinkingSound = true;
+    this.deps.engine.setThinking(true);
   }
 
   private clearThinking(): void {
