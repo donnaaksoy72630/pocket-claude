@@ -28,7 +28,7 @@ vi.mock('expo-speech', () => speech);
 vi.mock('expo-audio', () => ({ setAudioModeAsync: vi.fn(async () => {}) }));
 vi.mock('../modules/pocket-call', () => ({ PocketCall: null }));
 
-const { JsSpeechEngine, createSpeechEngine } = await import('../src/speech-engine');
+const { JsSpeechEngine, createSpeechEngine, keyboardLanguages } = await import('../src/speech-engine');
 
 const OPTIONS = { language: 'ru-RU', voice: null, callerName: 'Lipton', speaker: true, useCallKit: true, silenceMs: 500, holdWords: ['и'], contextualStrings: [] };
 
@@ -105,6 +105,16 @@ describe('JsSpeechEngine (Android and iPhones without the native engine)', () =>
   });
 });
 
+describe('keyboardLanguages', () => {
+  it('reads the keyboards on an iPhone with the native engine, and finds none elsewhere', async () => {
+    expect(await keyboardLanguages()).toEqual([]);
+    vi.resetModules();
+    vi.doMock('../modules/pocket-call', () => ({ PocketCall: { keyboardLanguages: vi.fn(async () => ['en-US', 'ru-RU']), addListener: vi.fn() } }));
+    const { keyboardLanguages: read } = await import('../src/speech-engine');
+    expect(await read()).toEqual(['en-US', 'ru-RU']);
+  });
+});
+
 describe('createSpeechEngine', () => {
   it('uses the native iOS engine when the app was built with it', async () => {
     vi.resetModules();
@@ -149,5 +159,20 @@ describe('createSpeechEngine', () => {
     }));
     const { createSpeechEngine: create } = await import('../src/speech-engine');
     await expect(create().start(OPTIONS)).rejects.toThrow('Microphone access is off');
+    await expect(create().start(OPTIONS)).rejects.toMatchObject({ code: 'permission' });
+  });
+
+  it('says in words why the native engine did not start', async () => {
+    vi.resetModules();
+    const native = {
+      requestPermissions: vi.fn(async () => ({ speech: true, microphone: true })),
+      start: vi.fn(async () => {
+        throw Object.assign(new Error('Speech recognition does not support ru-RU on this iPhone.'), { code: 'ERR_CALL_LANGUAGE' });
+      }),
+      addListener: vi.fn(() => ({ remove: () => {} })),
+    };
+    vi.doMock('../modules/pocket-call', () => ({ PocketCall: native }));
+    const { createSpeechEngine: create } = await import('../src/speech-engine');
+    await expect(create().start(OPTIONS)).rejects.toMatchObject({ code: 'language', message: expect.stringContaining('Pick another language') });
   });
 });

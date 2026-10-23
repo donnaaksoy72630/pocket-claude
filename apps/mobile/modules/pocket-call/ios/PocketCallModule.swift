@@ -1,6 +1,7 @@
 import AVFoundation
 import ExpoModulesCore
 import Speech
+import UIKit
 
 /// The iOS call engine behind src/speech-engine.ts; the JS side of this interface is modules/pocket-call/index.ts.
 public final class PocketCallModule: Module {
@@ -41,7 +42,9 @@ public final class PocketCallModule: Module {
         case .success(let info):
           promise.resolve(info)
         case .failure(let error):
-          promise.reject("ERR_CALL_START", error.localizedDescription)
+          // ERR_CALL_LANGUAGE, ERR_CALL_MICROPHONE…: src/speech-engine.ts puts them in words.
+          let code = (error as? CallError).map { "ERR_CALL_\($0.code.uppercased())" } ?? "ERR_CALL_START"
+          promise.reject(code, error.localizedDescription)
         }
       }
     }
@@ -93,6 +96,13 @@ public final class PocketCallModule: Module {
     Function("preferredLanguages") { () -> [String] in
       Locale.preferredLanguages
     }
+
+    // UIKit: read on the main thread.
+    AsyncFunction("keyboardLanguages") { () -> [String] in
+      MainActor.assumeIsolated {
+        UITextInputMode.activeInputModes.compactMap { $0.primaryLanguage }
+      }
+    }.runOnQueue(.main)
   }
 }
 

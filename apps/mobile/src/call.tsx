@@ -9,9 +9,9 @@ import { loadCallPrefs } from './call-prefs';
 import { useAppActive } from './hooks';
 import { personaFor } from './persona';
 import { useSession } from './session';
-import { createSpeechEngine, preferredLanguages } from './speech-engine';
+import { callLanguageFor, createSpeechEngine } from './speech-engine';
 import { colors } from './theme';
-import { resolveCallLanguage, VoiceCall, type CallPhase, type CallSnapshot } from './voice';
+import { VoiceCall, type CallPhase, type CallSnapshot } from './voice';
 
 interface ActiveCall {
   sessionId: string;
@@ -70,7 +70,8 @@ export function CallProvider({ children }: { children: ReactNode }) {
       const mine = ++token.current;
       setActive({ sessionId, startedAt: Date.now() });
       setSnapshot(null);
-      void loadCallPrefs().then((prefs) => {
+      void loadCallPrefs().then(async (prefs) => {
+        const language = await callLanguageFor(prefs.language, client.getState().threads);
         if (mine !== token.current) return;
         const state = client.getState();
         const call = new VoiceCall({
@@ -78,7 +79,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
           send: (text) => client.send(sessionId, text, undefined, { voice: true }),
           respondPermission: (requestId, decision) => client.respondPermission(requestId, decision),
           onChange: setSnapshot,
-          language: resolveCallLanguage(prefs.language, preferredLanguages()),
+          language,
           voice: prefs.voice,
           callerName: personaFor(sessionId).name,
           speaker: prefs.speaker,

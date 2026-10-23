@@ -1,8 +1,9 @@
 import { setAudioModeAsync } from 'expo-audio';
 import * as Speech from 'expo-speech';
 import { ExpoSpeechRecognitionModule, type ExpoSpeechRecognitionResultEvent } from 'expo-speech-recognition';
+import type { ChatItem } from '@pocket/client-core';
 import { PocketCall, type PocketCallModule } from '../modules/pocket-call';
-import { endpointDelay, type CaptureMode, type EngineEvent, type EngineInfo, type EngineStartOptions, type SpeechEngine } from './voice';
+import { endpointDelay, EngineError, recentUserTexts, resolveCallLanguage, type CaptureMode, type EngineEvent, type EngineInfo, type EngineStartOptions, type SpeechEngine } from './voice';
 
 type Listener = (event: EngineEvent) => void;
 
@@ -14,8 +15,8 @@ class NativeSpeechEngine implements SpeechEngine {
 
   async start(options: EngineStartOptions): Promise<EngineInfo> {
     const allowed = await this.native.requestPermissions();
-    if (!allowed.microphone) throw new Error('Microphone access is off: iPhone Settings → Pocket → Microphone.');
-    if (!allowed.speech) throw new Error('Speech recognition is off: iPhone Settings → Pocket → Speech Recognition.');
+    if (!allowed.microphone) throw new EngineError('permission', 'Microphone access is off: iPhone Settings → Pocket → Microphone.');
+    if (!allowed.speech) throw new EngineError('permission', 'Speech recognition is off: iPhone Settings → Pocket → Speech Recognition.');
     // Hung up during the permission prompt: starting now would leave the microphone on with nobody listening.
     if (this.ended) throw new Error('The call has ended.');
     const info = await this.native.start({
@@ -30,6 +31,8 @@ class NativeSpeechEngine implements SpeechEngine {
       silenceMs: options.silenceMs,
       holdWords: options.holdWords,
       contextualStrings: options.contextualStrings,
+    }).catch((e: unknown) => {
+      throw nativeStartError(e, options.language);
     });
     return { echoCancellation: info.echoCancellation, callKit: info.callKit, voiceName: info.voiceName, voiceQuality: info.voiceQuality };
   }
@@ -73,6 +76,22 @@ class NativeSpeechEngine implements SpeechEngine {
   }
 }
 
+/** Why the native engine did not start, in words for the call screen; its codes come from CallError in Swift. */
+function nativeStartError(e: unknown, language: string): Error {
+  const code = (e as { code?: unknown } | null)?.code;
+  const message = e instanceof Error ? e.message : String(e);
+  switch (code) {
+    case 'ERR_CALL_LANGUAGE':
+      return new EngineError('language', `Speech recognition does not support ${language} on this iPhone. Pick another language in Pocket Settings → Voice calls.`);
+    case 'ERR_CALL_MICROPHONE':
+      return new EngineError('audio', 'The microphone is busy: another app may be using it. Close it and call again.');
+    case 'ERR_CALL_AUDIO':
+      return new EngineError('audio', `The call audio did not start. ${message}`);
+    default:
+      return e instanceof Error ? e : new Error(message);
+  }
+}
+
 /**
  * Android, and iPhone builds without the native module: the system recognizer and voice. No echo cancellation, so
  * the microphone is off while the phone talks, and no system call UI.
@@ -99,7 +118,7 @@ export class JsSpeechEngine implements SpeechEngine {
   async start(options: EngineStartOptions): Promise<EngineInfo> {
     this.options = options;
     const allowed = await ExpoSpeechRecognitionModule.requestPermissionsAsync();
-    if (!allowed.granted) throw new Error('Microphone or speech recognition was not allowed.');
+    if (!allowed.granted) throw new EngineError('permission', 'Microphone or speech recognition is off: allow both for Pocket in the phone settings.');
     this.subs.push(
       ExpoSpeechRecognitionModule.addListener('result', (e: ExpoSpeechRecognitionResultEvent) => this.onResult(e)),
       ExpoSpeechRecognitionModule.addListener('error', (e) => {
@@ -332,6 +351,23 @@ export async function listVoices(language: string): Promise<VoiceOption[]> {
     .filter((v) => v.language.toLowerCase().startsWith(prefix))
     .map((v) => ({ identifier: v.identifier, name: v.name, quality: v.quality === Speech.VoiceQuality.Enhanced ? ('enhanced' as const) : ('default' as const) }))
     .sort((a, b) => (a.quality === b.quality ? 0 : a.quality === 'enhanced' ? -1 : 1));
+}
+
+/** Languages of the keyboards added on the phone, e.g. ru-RU; iPhone only. */
+export async function keyboardLanguages(): Promise<string[]> {
+  if (!PocketCall) return [];
+  try {
+    return await PocketCall.keyboardLanguages();
+  } catch {
+    // A build from before keyboardLanguages existed.
+    return [];
+  }
+}
+
+/** The language a call uses now: the one picked in Settings, or on "auto" what the chats and the phone suggest. */
+export async function callLanguageFor(choice: string, threads: Readonly<Record<string, readonly ChatItem[] | undefined>>): Promise<string> {
+  const keyboards = choice === 'auto' ? await keyboardLanguages() : [];
+  return resolveCallLanguage(choice, preferredLanguages(), { texts: recentUserTexts(threads), keyboards });
 }
 
 /** The phone's preferred languages, most preferred first. */

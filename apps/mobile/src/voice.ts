@@ -127,10 +127,51 @@ export function callLanguage(locale: string | undefined): string {
   return REGIONS[lang] ?? `${lang}-${lang.toUpperCase()}`;
 }
 
-/** The language picked in Settings, or the phone's first preferred language. */
-export function resolveCallLanguage(choice: string, preferred: readonly string[]): string {
+/** What tells that the user speaks Russian although the phone may be in English. */
+export interface LanguageHints {
+  /** What the user typed in the chats lately (recentUserTexts). */
+  texts?: readonly string[];
+  /** Languages of the phone's keyboards. */
+  keyboards?: readonly string[];
+}
+
+/**
+ * The language picked in Settings. "auto" is Russian when the user writes Russian in the chats, or the phone has a
+ * Russian keyboard or Russian among its languages (many Russian speakers keep the iPhone in English); otherwise the
+ * phone's first language.
+ */
+export function resolveCallLanguage(choice: string, preferred: readonly string[], hints: LanguageHints = {}): string {
   if (choice && choice !== 'auto') return choice;
-  return callLanguage(preferred[0]);
+  const russian = [...preferred, ...(hints.keyboards ?? [])].some((l) => callLang(l) === 'ru') || writesRussian(hints.texts ?? []);
+  return russian ? 'ru-RU' : callLanguage(preferred[0]);
+}
+
+/** Russian makes up a fair share of what the user typed: code, paths and names are Latin even in Russian chats. */
+export function writesRussian(texts: readonly string[]): boolean {
+  let cyrillic = 0;
+  let latin = 0;
+  for (const text of texts) {
+    cyrillic += text.match(/[а-яё]/gi)?.length ?? 0;
+    latin += text.match(/[a-z]/gi)?.length ?? 0;
+  }
+  return cyrillic >= 12 && cyrillic * 2 >= latin;
+}
+
+/** The user's own messages, the last few of each chat. */
+export function recentUserTexts(threads: Readonly<Record<string, readonly ChatItem[] | undefined>>, perChat = 10): string[] {
+  const texts: string[] = [];
+  for (const items of Object.values(threads)) {
+    if (!items) continue;
+    let taken = 0;
+    for (let i = items.length - 1; i >= 0 && taken < perChat; i--) {
+      const item = items[i]!;
+      if (item.type === 'user' && item.text) {
+        texts.push(item.text);
+        taken++;
+      }
+    }
+  }
+  return texts;
 }
 
 export type CallLang = 'ru' | 'en';
@@ -150,13 +191,14 @@ export function holdWords(lang: CallLang): string[] {
 }
 
 /**
- * How long a pause ends an utterance: shorter after a full stop the recognizer punctuated, longer after "and",
- * "что" and the like. The native engine applies the same rule (CallEngine.endpointDelay).
+ * How long a pause ends an utterance: 0.8 s after a full stop the recognizer punctuated, `silenceMs` (1.1 s) after
+ * other words, 0.7 s longer after "и", "что", "ещё" and the like. The native engine applies the same rule
+ * (CallEngine.endpointDelay).
  */
 export function endpointDelay(text: string, silenceMs: number, hold: readonly string[]): number {
   const trimmed = text.trim();
   let wait = silenceMs;
-  if (/[.!?…]$/.test(trimmed)) wait = Math.min(wait, 700);
+  if (/[.!?…]$/.test(trimmed)) wait = Math.min(wait, 800);
   const last = words(trimmed).at(-1) ?? '';
   if (hold.includes(last)) wait += 700;
   return wait;
@@ -206,6 +248,7 @@ const PHRASES = {
     allowed: 'Разрешил.',
     denied: 'Отказал.',
     onScreen: 'Ответьте на экране.',
+    wait: 'Секунду.',
     rest: 'Остальное — в чате.',
     code: (name: string | null) => (name ? `Код для ${name} — в чате.` : 'Код — в чате.'),
     inChat: 'Ответ — в чате.',
@@ -217,6 +260,7 @@ const PHRASES = {
     allowed: 'Allowed.',
     denied: 'Denied.',
     onScreen: 'Please answer on the screen.',
+    wait: 'One second.',
     rest: 'The rest is in the chat.',
     code: (name: string | null) => (name ? `The ${name} code is in the chat.` : 'The code is in the chat.'),
     inChat: 'The answer is in the chat.',
@@ -274,6 +318,17 @@ export interface EngineInfo {
   voiceQuality: VoiceQuality | null;
 }
 
+/** Why an engine could not start. A `permission` one is fixed in the phone's settings. */
+export class EngineError extends Error {
+  constructor(
+    readonly code: 'permission' | 'language' | 'audio',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'EngineError';
+  }
+}
+
 export interface SpeechEngine {
   start(options: EngineStartOptions): Promise<EngineInfo>;
   end(): void;
@@ -300,6 +355,8 @@ export interface CallSnapshot {
   said: string;
   userSpeaking: boolean;
   error?: string;
+  /** The error is fixed in the phone's settings (a permission is off): the call screen offers to open them. */
+  errorAction?: 'settings';
   /** Something worth knowing that does not stop the call. */
   notice?: string;
   echoCancellation: boolean;
@@ -332,8 +389,10 @@ export interface VoiceCallDeps {
 }
 
 const SILENCE_MS = 1100;
-/** Silence after an utterance before the soft "thinking" sound starts. */
-const THINKING_SOUND_AFTER_MS = 900;
+/** Claude has said nothing this long after the user spoke: "секунду" first, a soft tone after that. */
+const THINKING_CUE_AFTER_MS = 4000;
+/** Those cues come at most this often. */
+const THINKING_CUE_EVERY_MS = 8000;
 /** About 40 seconds of speech: a longer spoken answer is cut short with "the rest is in the chat". */
 const MAX_SPOKEN_PER_TURN = 550;
 const LOG_LINES = 150;
@@ -356,6 +415,17 @@ export class VoiceCall {
   private mode: CaptureMode = 'off';
   private thinkingSound = false;
   private thinkingTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A notice about something that passes (recognition trouble, the background): cleared once the user is heard. */
+  private passingNotice: string | null = null;
+  private lastCueAt = Number.NEGATIVE_INFINITY;
+  /** "Секунду" was said in this turn: later cues are the tone. */
+  private waitSaid = false;
+  // The time to the first sound of the answer: when the user's voice stopped, when the utterance went out, and the
+  // sentence whose start ends the wait.
+  private voiceEndedAt = Number.NEGATIVE_INFINITY;
+  private sentAt = 0;
+  private firstSoundPending = false;
+  private firstSoundId: string | null = null;
 
   // The chat
   private items: readonly ChatItem[];
@@ -435,7 +505,7 @@ export class VoiceCall {
       this.sync();
     } catch (e) {
       if (this.ended) return;
-      this.fail(e instanceof Error ? e.message : String(e));
+      this.fail(e instanceof Error ? e.message : String(e), e instanceof EngineError && e.code === 'permission' ? 'settings' : undefined);
     }
   }
 
@@ -522,6 +592,7 @@ export class VoiceCall {
         break;
       case 'vad':
         this.snap = { ...this.snap, userSpeaking: e.speaking };
+        if (!e.speaking) this.voiceEndedAt = Date.now();
         // Echo or noise opened the recognizer while the phone talks and nothing came of it.
         if (!e.speaking && this.mode === 'watch') this.deps.engine.cancelCapture();
         break;
@@ -532,6 +603,10 @@ export class VoiceCall {
         this.onUtterance(e.text);
         break;
       case 'speechStart':
+        if (e.id === this.firstSoundId) {
+          this.firstSoundId = null;
+          this.noteFirstSound();
+        }
         this.started.add(e.id);
         this.current = this.pending.get(e.id) ?? null;
         if (this.current !== null) this.snap = { ...this.snap, said: this.current };
@@ -553,16 +628,19 @@ export class VoiceCall {
       case 'route':
         this.snap = { ...this.snap, route: e.output };
         break;
-      case 'recognitionError':
+      case 'recognitionError': {
         this.note(`recognition error ${e.code}: ${e.message}`);
+        const notice = recognitionNotice(e.code, this.deps.language);
+        if (notice) this.notice(notice);
         break;
+      }
       case 'error':
         this.note(`error ${e.code}: ${e.message}`);
         if (e.fatal) {
           this.fail(e.message);
           return;
         }
-        this.snap = { ...this.snap, notice: e.message };
+        this.notice(e.message);
         break;
       case 'log':
         this.note(e.message);
@@ -600,6 +678,8 @@ export class VoiceCall {
     }
     this.note(`heard: ${text}`);
     this.snap = { ...this.snap, heard: text };
+    if (this.passingNotice !== null && this.snap.notice === this.passingNotice) this.snap = { ...this.snap, notice: undefined };
+    this.passingNotice = null;
     if (this.confirming) {
       this.answerPermission(text);
       return;
@@ -614,6 +694,18 @@ export class VoiceCall {
     this.awaitingReply = true;
     this.spokenThisTurn = 0;
     this.turnCapped = false;
+    this.waitSaid = false;
+    this.sentAt = Date.now();
+    this.firstSoundPending = true;
+    this.firstSoundId = null;
+  }
+
+  /** How long the user waited: from the end of their phrase to the first sound of the answer. */
+  private noteFirstSound(): void {
+    const now = Date.now();
+    // The pause that ended the utterance comes right before it went out; an older one belongs to another phrase.
+    const fromVoice = this.voiceEndedAt <= this.sentAt && this.sentAt - this.voiceEndedAt < 5000 ? `${now - this.voiceEndedAt} ms after the user stopped talking, ` : '';
+    this.note(`reply: first sound ${fromVoice}${now - this.sentAt} ms after sending`);
   }
 
   /** Stops the reply being read; the rest of this turn stays in the chat. */
@@ -622,6 +714,8 @@ export class VoiceCall {
     this.skipFrom = this.items.length - 1;
     // The user moved on: the rest of that turn is not waited for either.
     this.awaitingReply = false;
+    this.firstSoundPending = false;
+    this.firstSoundId = null;
     this.deps.engine.stopSpeaking();
     this.pending.clear();
     this.started.clear();
@@ -695,7 +789,7 @@ export class VoiceCall {
     this.say(phrase, true);
   }
 
-  private say(text: string, always: boolean): void {
+  private say(text: string, always: boolean, filler = false): void {
     let sentence = text;
     if (!always) {
       if (this.turnCapped) return;
@@ -706,6 +800,10 @@ export class VoiceCall {
       this.spokenThisTurn += sentence.length;
     }
     const id = `s${++this.seq}`;
+    if (this.firstSoundPending && !filler) {
+      this.firstSoundPending = false;
+      this.firstSoundId = id;
+    }
     this.pending.set(id, sentence);
     this.deps.engine.speak(id, sentence);
   }
@@ -758,17 +856,29 @@ export class VoiceCall {
     }
     if (phase === 'thinking') {
       if (!this.thinkingSound && !this.thinkingTimer) {
-        this.thinkingTimer = setTimeout(() => {
-          this.thinkingTimer = null;
-          if (this.ended || this.phase() !== 'thinking') return;
-          this.thinkingSound = true;
-          this.deps.engine.setThinking(true);
-        }, THINKING_SOUND_AFTER_MS);
+        const wait = Math.max(THINKING_CUE_AFTER_MS, this.lastCueAt + THINKING_CUE_EVERY_MS - Date.now());
+        this.thinkingTimer = setTimeout(() => this.cue(), wait);
       }
     } else {
       this.clearThinking();
     }
     this.emit({ ...this.snap, phase });
+  }
+
+  /** Claude is still quiet: say "секунду" once a turn (no tone on Android), then the engine's soft tone. */
+  private cue(): void {
+    this.thinkingTimer = null;
+    if (this.ended || this.phase() !== 'thinking') return;
+    this.lastCueAt = Date.now();
+    if (!this.waitSaid) {
+      this.waitSaid = true;
+      this.note('still thinking: said "one second"');
+      this.say(PHRASES[this.lang].wait, true, true);
+      this.sync();
+      return;
+    }
+    this.thinkingSound = true;
+    this.deps.engine.setThinking(true);
   }
 
   private clearThinking(): void {
@@ -780,11 +890,16 @@ export class VoiceCall {
     }
   }
 
-  private fail(message: string): void {
+  private fail(message: string, action?: 'settings'): void {
     this.note(`failed: ${message}`);
     this.failed = true;
-    this.snap = { ...this.snap, error: message };
+    this.snap = { ...this.snap, error: message, ...(action ? { errorAction: action } : {}) };
     this.end();
+  }
+
+  private notice(text: string): void {
+    this.passingNotice = text;
+    this.snap = { ...this.snap, notice: text };
   }
 
   private emit(next: CallSnapshot): void {
@@ -807,6 +922,7 @@ const SNAPSHOT_KEYS: (keyof CallSnapshot)[] = [
   'said',
   'userSpeaking',
   'error',
+  'errorAction',
   'notice',
   'echoCancellation',
   'callKit',
@@ -816,8 +932,15 @@ const SNAPSHOT_KEYS: (keyof CallSnapshot)[] = [
   'endedRemotely',
 ];
 
+/** Recognition trouble the user can do something about, in words; null for what only goes to the log. */
+function recognitionNotice(code: string, language: string): string | null {
+  if (code === 'unavailable' || code === 'network') return 'Speech recognition is unavailable right now: check the internet connection.';
+  if (code === 'language-not-supported') return `Speech recognition does not support ${language} on this phone. Pick another language in Pocket settings.`;
+  return null;
+}
+
 function voiceHint(lang: CallLang): string {
   return lang === 'ru'
-    ? 'A better Russian voice: iPhone Settings → Accessibility → Spoken Content → Voices → Russian → Milena or Yuri (Enhanced), then pick it in Pocket settings.'
-    : 'A better voice: iPhone Settings → Accessibility → Spoken Content → Voices, download an Enhanced or Premium voice, then pick it in Pocket settings.';
+    ? 'A better Russian voice: iPhone Settings → Accessibility → Read & Speak (Spoken Content before iOS 26) → Voices → Russian → Milena (Enhanced), then pick it in Pocket settings.'
+    : 'A better voice: iPhone Settings → Accessibility → Read & Speak (Spoken Content before iOS 26) → Voices, download an Enhanced or Premium voice, then pick it in Pocket settings.';
 }

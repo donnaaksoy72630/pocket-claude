@@ -924,7 +924,7 @@ final class CallEngine: NSObject {
   private func endpointDelay(_ text: String) -> TimeInterval {
     guard let config else { return 1.1 }
     var wait = config.silenceMs
-    if let last = text.last, ".!?…".contains(last) { wait = min(wait, 700) }
+    if let last = text.last, ".!?…".contains(last) { wait = min(wait, 800) }
     if let word = CallEngine.words(text).last, config.holdWords.contains(word) { wait += 700 }
     return wait / 1000
   }
@@ -1315,7 +1315,11 @@ extension CallEngine: AVSpeechSynthesizerDelegate {
 extension CallEngine: SFSpeechRecognizerDelegate {
   func speechRecognizer(_ speechRecognizer: SFSpeechRecognizer, availabilityDidChange available: Bool) {
     queue.async { [weak self] in
-      self?.note("speech recognition \(available ? "available" : "unavailable")")
+      guard let self, self.running else { return }
+      self.note("speech recognition \(available ? "available" : "unavailable")")
+      if !available {
+        self.emit(["type": "recognitionError", "code": "unavailable", "message": "Speech recognition is unavailable right now."])
+      }
     }
   }
 }
