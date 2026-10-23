@@ -28,7 +28,8 @@ vi.mock('expo-speech', () => speech);
 vi.mock('expo-audio', () => ({ setAudioModeAsync: vi.fn(async () => {}) }));
 vi.mock('../modules/pocket-call', () => ({ PocketCall: null }));
 
-const { JsSpeechEngine, createSpeechEngine, keyboardLanguages } = await import('../src/speech-engine');
+const { JsSpeechEngine, callLanguageFor, createSpeechEngine, keyboardLanguages } = await import('../src/speech-engine');
+const { callLanguage } = await import('../src/voice');
 
 const OPTIONS = { language: 'ru-RU', voice: null, callerName: 'Lipton', speaker: true, useCallKit: true, silenceMs: 500, holdWords: ['и'], contextualStrings: [] };
 
@@ -61,6 +62,57 @@ describe('JsSpeechEngine (Android and iPhones without the native engine)', () =>
     expect(recognition.abort).toHaveBeenCalled();
     // Still listening: the next utterance starts right away.
     expect(recognition.start).toHaveBeenCalledTimes(2);
+  });
+
+  it('backs off when the recognizer keeps ending right after it starts, and says so on the fourth time', async () => {
+    const engine = new JsSpeechEngine();
+    const events: EngineEvent[] = [];
+    engine.subscribe((e) => events.push(e));
+    await engine.start(OPTIONS);
+    engine.setMode('listen');
+    expect(recognition.start).toHaveBeenCalledTimes(1);
+    const waits = [500, 1000, 2000, 4000, 8000, 8000];
+    waits.forEach((wait, i) => {
+      listeners.start!({});
+      listeners.end!({});
+      vi.advanceTimersByTime(wait - 1);
+      expect(recognition.start).toHaveBeenCalledTimes(i + 1);
+      vi.advanceTimersByTime(1);
+      expect(recognition.start).toHaveBeenCalledTimes(i + 2);
+    });
+    expect(events.filter((e) => e.type === 'error')).toEqual([expect.objectContaining({ code: 'recognition', fatal: false })]);
+
+    // A session that ran for a while ends the usual way: listening resumes at once and the count starts over.
+    listeners.start!({});
+    vi.advanceTimersByTime(5000);
+    listeners.end!({});
+    vi.advanceTimersByTime(0);
+    expect(recognition.start).toHaveBeenCalledTimes(waits.length + 2);
+  });
+
+  it('does not let the end of a session it aborted stop the next one', async () => {
+    const engine = new JsSpeechEngine();
+    const events: EngineEvent[] = [];
+    engine.subscribe((e) => events.push(e));
+    await engine.start(OPTIONS);
+    engine.setMode('listen');
+    listeners.start!({});
+    listeners.result!({ isFinal: true, results: [{ transcript: 'привет' }] });
+    vi.advanceTimersByTime(150);
+    expect(events.filter((e) => e.type === 'final')).toEqual([{ type: 'final', text: 'привет' }]);
+    expect(recognition.abort).toHaveBeenCalledTimes(1);
+    expect(recognition.start).toHaveBeenCalledTimes(2);
+    // The aborted session reports its end only now, after the next one was asked to start.
+    listeners.error!({ error: 'aborted', message: 'Speech recognition aborted.' });
+    listeners.end!({});
+    listeners.start!({});
+    vi.advanceTimersByTime(20_000);
+    expect(recognition.start).toHaveBeenCalledTimes(2);
+    expect(events.filter((e) => e.type === 'error' || e.type === 'recognitionError')).toEqual([]);
+    // The new session is the one that hears the next words.
+    listeners.result!({ isFinal: true, results: [{ transcript: 'как дела' }] });
+    vi.advanceTimersByTime(150);
+    expect(events.filter((e) => e.type === 'final').at(-1)).toEqual({ type: 'final', text: 'как дела' });
   });
 
   it('turns the microphone off while it talks, at the normal rate, with the best voice', async () => {
@@ -102,6 +154,20 @@ describe('JsSpeechEngine (Android and iPhones without the native engine)', () =>
     // A late onStopped from the platform changes nothing.
     (speech.speak.mock.calls[0]![1] as { onStopped: () => void }).onStopped();
     expect(speech.speak).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('callLanguageFor (Android and iPhones without the native engine)', () => {
+  const thread = (text: string) => ({ a: [{ type: 'user' as const, key: 'u1', text, from: 'phone' }] });
+
+  it('calls in Russian when the user writes Russian in the chats, whatever the phone language', async () => {
+    expect(await callLanguageFor('auto', thread('Сделай скриншот и скажи, что на экране'))).toBe('ru-RU');
+  });
+
+  it('follows the phone otherwise, and a language picked in Settings always wins', async () => {
+    const phone = callLanguage(Intl.DateTimeFormat().resolvedOptions().locale);
+    expect(await callLanguageFor('auto', thread('take a screenshot and tell me what is on the screen'))).toBe(phone);
+    expect(await callLanguageFor('en-US', thread('Сделай скриншот и скажи, что на экране'))).toBe('en-US');
   });
 });
 
