@@ -17,16 +17,21 @@ final class CallKitBridge: NSObject, CXProviderDelegate {
 
   private let provider: CXProvider
   private let controller: CXCallController
+  private let createdAt = ProcessInfo.processInfo.systemUptime
   private var call: UUID?
+  /// Every call this provider started, to end one CallKit still keeps.
+  private var started: Set<UUID> = []
   private var name = ""
   private var connected = false
 
   var active: Bool { call != nil }
+  /// Seconds since the provider was made: CXProvider registers with the system asynchronously.
+  var age: TimeInterval { ProcessInfo.processInfo.systemUptime - createdAt }
 
   init(queue: DispatchQueue) {
     let configuration = CXProviderConfiguration()
     configuration.supportsVideo = false
-    configuration.maximumCallGroups = 1
+    // maximumCallGroups stays at its default (2), as in Apple's Speakerbox sample.
     configuration.maximumCallsPerCallGroup = 1
     configuration.supportedHandleTypes = [.generic]
     configuration.includesCallsInRecents = false
@@ -39,6 +44,7 @@ final class CallKitBridge: NSObject, CXProviderDelegate {
   func start(name: String, completion: @escaping (Error?) -> Void) {
     let id = UUID()
     call = id
+    started.insert(id)
     self.name = name
     connected = false
     let action = CXStartCallAction(call: id, handle: CXHandle(type: .generic, value: name))
@@ -64,6 +70,46 @@ final class CallKitBridge: NSObject, CXProviderDelegate {
       self.provider.reportCall(with: id, endedAt: nil, reason: .remoteEnded)
     }
   }
+
+  /// What CallKit has on the phone now, other apps' calls and phone calls included.
+  func callsSummary() -> String {
+    let calls = controller.callObserver.calls
+    guard !calls.isEmpty else { return "CallKit sees no calls" }
+    let list = calls.map { call -> String in
+      var traits = [call.isOutgoing ? "outgoing" : "incoming"]
+      if call.hasConnected { traits.append("connected") }
+      if call.isOnHold { traits.append("on hold") }
+      if call.hasEnded { traits.append("ended") }
+      if started.contains(call.uuid) { traits.append(call.uuid == self.call ? "this call" : "an earlier call of Pocket") }
+      return traits.joined(separator: " ")
+    }
+    return "CallKit sees \(calls.count) call(s): \(list.joined(separator: "; "))"
+  }
+
+  /// Ends calls of this provider that CallKit still keeps although Pocket is done with them.
+  func endStaleCalls() {
+    for stale in controller.callObserver.calls where started.contains(stale.uuid) && stale.uuid != call && !stale.hasEnded {
+      onLog("ending a call CallKit still kept")
+      provider.reportCall(with: stale.uuid, endedAt: nil, reason: .failed)
+    }
+  }
+
+  /// A refused request, by name: "maximumCallGroupsReached (com.apple.CallKit.error.requesttransaction 7)".
+  static func describe(_ error: NSError) -> String {
+    guard error.domain == transactionErrors else { return "\(error.domain) \(error.code): \(error.localizedDescription)" }
+    let names = [
+      0: "unknown", 1: "unentitled", 2: "unknownCallProvider", 3: "emptyTransaction", 4: "unknownCallUUID",
+      5: "callUUIDAlreadyExists", 6: "invalidAction", 7: "maximumCallGroupsReached", 8: "callIsProtected",
+    ]
+    return "\(names[error.code] ?? "code \(error.code)") (\(error.domain) \(error.code))"
+  }
+
+  /// Refusals seen when a request reaches the system before the provider's registration: asking again may pass.
+  static func mayPassLater(_ error: NSError) -> Bool {
+    error.domain == transactionErrors && (error.code == 7 || error.code == 2)
+  }
+
+  private static let transactionErrors = "com.apple.CallKit.error.requesttransaction"
 
   /// `fallback` runs when CallKit refuses, so that the mute still happens.
   func setMuted(_ muted: Bool, fallback: @escaping () -> Void) {

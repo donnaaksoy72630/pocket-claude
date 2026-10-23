@@ -247,14 +247,27 @@ final class CallEngine: NSObject {
       return
     }
     // CallKit activates the session and calls didActivate, where the engine starts.
-    callKit().start(name: config.callerName) { [weak self] error in
-      self?.callKitStarted(error)
+    let bridge = callKit()
+    note("CallKit call starting; \(bridge.callsSummary()); provider made \(Int(bridge.age)) s ago")
+    startCallKit(bridge, name: config.callerName, attempt: 0)
+  }
+
+  private func startCallKit(_ bridge: CallKitBridge, name: String, attempt: Int) {
+    bridge.start(name: name) { [weak self] error in
+      self?.callKitStarted(error, attempt: attempt)
     }
+    activationTimeout?.cancel()
     let timeout = DispatchWorkItem { [weak self] in
       self?.activationTimedOut()
     }
     activationTimeout = timeout
     queue.asyncAfter(deadline: .now() + 4, execute: timeout)
+  }
+
+  /// CXProvider registers with the system asynchronously: made when the module loads, the first call does not race
+  /// it (a request right after making it was refused with maximumCallGroupsReached).
+  func prepareCallKit() {
+    queue.async { _ = self.callKit() }
   }
 
   /// The session is on, activated by CallKit or by us: the engine starts and the call is on.
@@ -312,9 +325,21 @@ final class CallEngine: NSObject {
     return made
   }
 
-  private func callKitStarted(_ error: Error?) {
+  private func callKitStarted(_ error: Error?, attempt: Int) {
     guard let error, running, engine == nil else { return }
-    note("CallKit did not start the call (\(error.localizedDescription)), going on without it")
+    let refusal = error as NSError
+    let bridge = callKit()
+    note("CallKit refused the call: \(CallKitBridge.describe(refusal)); \(bridge.callsSummary()); provider made \(Int(bridge.age)) s ago")
+    if attempt == 0, CallKitBridge.mayPassLater(refusal) {
+      bridge.endStaleCalls()
+      queue.asyncAfter(deadline: .now() + 1) { [weak self] in
+        guard let self, self.running, self.engine == nil, let config = self.config else { return }
+        self.note("asking CallKit again")
+        self.startCallKit(bridge, name: config.callerName, attempt: 1)
+      }
+      return
+    }
+    note("going on without CallKit")
     startDirectly()
   }
 

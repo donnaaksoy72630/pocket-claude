@@ -55,11 +55,13 @@ async function connect(code: PairingCode, role: 'executor' | 'client', name: str
   link.connect();
   await ready;
   const brainId = joined.bundle.brainDeviceId;
-  const next = <T extends InnerMessage['type']>(type: T, after = 0) =>
+  /** The first message of the type after `after` (an inbox index) that also passes `test`. */
+  const next = <T extends InnerMessage['type']>(type: T, after = 0, test: (m: Extract<InnerMessage, { type: T }>) => boolean = () => true) =>
     until<Extract<InnerMessage, { type: T }>>(`${name} ← ${type}`, (resolve) => {
-      const hit = inbox.slice(after).find((m) => m.type === type);
+      const matches = (m: InnerMessage) => m.type === type && test(m as Extract<InnerMessage, { type: T }>);
+      const hit = inbox.slice(after).find(matches);
       if (hit) resolve(hit as Extract<InnerMessage, { type: T }>);
-      else waiters.push({ match: (m) => m.type === type, resolve: (m) => resolve(m as Extract<InnerMessage, { type: T }>) });
+      else waiters.push({ match: matches, resolve: (m) => resolve(m as Extract<InnerMessage, { type: T }>) });
     });
   return {
     deviceId: joined.deviceId,
@@ -131,14 +133,16 @@ describe('people', () => {
     const pairing = await masha.ask({ type: 'computer.pair', payload: {} }, 'computer.pairing');
     const pc = await connect(parsePairingCode(pairing.payload.code), 'executor', 'masha-pc');
     pc.send({ type: 'executor.status', payload: { workspaces: ['C:\\\\work'], os: 'win32', shell: 'pwsh', capabilities: ['tools'] } });
-    const mashaComputers = await masha.next('computers.result', masha.inbox.length);
+    // The brain sends the list when the computer comes online and again on its status: wait for the one with tools.
+    const withTools = (m: { payload: { computers: { name: string; capabilities?: string[] }[] } }) => m.payload.computers.some((c) => c.capabilities?.includes('tools'));
+    const mashaComputers = await masha.next('computers.result', 0, withTools);
     expect(mashaComputers.payload.computers.map((c) => c.name)).toEqual(['masha-pc']);
     expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'remote', executorId: pc.deviceId });
     // A PocketClipboard-only laptop keeps the chat in chat-only mode but gives the pc_* tools a target.
     const clipPairing = await masha.ask({ type: 'computer.pair', payload: {} }, 'computer.pairing');
     const laptop = await connect(parsePairingCode(clipPairing.payload.code), 'executor', 'masha-laptop');
     laptop.send({ type: 'executor.status', payload: { workspaces: [], os: 'win32', shell: 'none', capabilities: ['clipboard', 'screenshot'] } });
-    await masha.next('computers.result', masha.inbox.length);
+    await masha.next('computers.result', 0, (m) => m.payload.computers.some((c) => c.name === 'masha-laptop' && c.capabilities?.includes('screenshot') === true));
     expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'remote', executorId: pc.deviceId, pcId: laptop.deviceId });
     await masha.ask({ type: 'computer.select', payload: { deviceId: laptop.deviceId, sessionId: mashaSession } }, 'computers.result');
     expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'remote', executorId: pc.deviceId, pcId: laptop.deviceId });
