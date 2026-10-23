@@ -40,7 +40,7 @@ import { ExecutorBridge } from './executor.js';
 import { log } from './log.js';
 import type { PcHandle } from './pc-tools.js';
 import { PermissionBroker } from './permissions.js';
-import { Session } from './session.js';
+import { Session, type UserTurn } from './session.js';
 import { migrateState, OWNER_ID, saveState, type BrainState, type PairedDevice, type UsageTotals, type User } from './store.js';
 
 const MAX_LIVE_SESSIONS = 2;
@@ -339,7 +339,7 @@ export class Brain {
     return !caps || caps.includes('tools');
   }
 
-  /** PocketClipboard with the overlay window: it mirrors the chat on screen and may read sessions, never write. */
+  /** PocketClipboard with the overlay window: it mirrors the chat on screen, reads sessions and writes text into them. */
   private isOverlay(deviceId: string): boolean {
     return !!this.executor.info(deviceId)?.capabilities?.includes('overlay');
   }
@@ -595,6 +595,13 @@ export class Brain {
           if (s && this.userOfSession(s.id) === device.userId) this.link.send(from, { type: 'session.history.result', payload: { sessionId: s.id, events: s.history() } });
           return;
         }
+        case 'message.send': {
+          // The overlay window writes into its person's chats: text only. Tool approvals stay on the phone.
+          if (!this.isOverlay(from)) return;
+          const s = this.sessions.get(message.payload.sessionId);
+          if (!s || this.userOfSession(s.id) !== device.userId) return this.sendError(from, 'unknown_session', 'Session not found');
+          return this.sendTurn(s, { text: message.payload.text, from }, from);
+        }
         default:
           return;
       }
@@ -639,14 +646,7 @@ export class Brain {
       case 'message.send': {
         const s = mySession(message.payload.sessionId);
         if (!s) return this.sendError(from, 'unknown_session', 'Session not found');
-        this.enforceLiveLimit(s.id);
-        try {
-          await s.send({ text: message.payload.text, attachments: message.payload.attachments, from, ...(message.payload.voice ? { voice: true } : {}) });
-        } catch (e) {
-          log(`send failed: ${String(e)}`);
-          this.sendError(from, 'claude_failed', e instanceof Error ? e.message : String(e));
-        }
-        return;
+        return this.sendTurn(s, { text: message.payload.text, attachments: message.payload.attachments, from, ...(message.payload.voice ? { voice: true } : {}) }, from);
       }
       case 'session.interrupt':
         return mySession(message.payload.sessionId)?.interrupt();
@@ -828,6 +828,17 @@ export class Brain {
       },
       ...(this.claudeVersion ? { claudeVersion: this.claudeVersion } : {}),
     };
+  }
+
+  /** Starts a turn; if Claude cannot start, the device that wrote hears about it. */
+  private async sendTurn(s: Session, turn: UserTurn, from: string): Promise<void> {
+    this.enforceLiveLimit(s.id);
+    try {
+      await s.send(turn);
+    } catch (e) {
+      log(`send failed: ${String(e)}`);
+      this.sendError(from, 'claude_failed', e instanceof Error ? e.message : String(e));
+    }
   }
 
   private enforceLiveLimit(keepId: string): void {
