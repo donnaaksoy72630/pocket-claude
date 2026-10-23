@@ -401,7 +401,6 @@ final class CallEngine: NSObject {
     }
     rebuiltAt = uptime()
     noiseFloor = -60
-
     reportRoute()
     note("audio restarted (\(reason)), route \(route)")
   }
@@ -692,7 +691,6 @@ final class CallEngine: NSObject {
   private func failRecognition(code: String, message: String, now: TimeInterval) {
     recognitionFailures += 1
     nextRecognitionAt = max(nextRecognitionAt, now + min(0.5 * pow(2, Double(recognitionFailures - 1)), 8))
-
     emit(["type": "recognitionError", "code": code, "message": message])
     if recognitionFailures == 4 {
       emit(["type": "error", "code": "recognition", "message": "Speech recognition keeps failing: \(message)", "fatal": false])
