@@ -9,16 +9,72 @@ export function speakable(text: string): string {
   return text
     .replace(/```[\s\S]*?```/g, ' ')
     .replace(/```[\s\S]*$/, ' ')
+    // Inline code with a path or a link is not read at all; a short command is.
+    .replace(/`[^`]*[/\\][^`]*`/g, ' ')
     .replace(/`([^`]*)`/g, '$1')
     .replace(/^\s{0,3}(?:[-*+•]|\d+[.)])\s+/gm, '')
     .replace(/^\s{0,3}#{1,6}\s+/gm, '')
     .replace(/\*\*|__|(?<!\w)[*_](?!\s)|(?<!\s)[*_](?!\w)/g, '')
     .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
     .replace(/https?:\/\/\S+/g, 'ссылка')
+    .replace(/[A-Za-z]:\\[^\s"'«»,;]*[^\s"'«»,;.]|(?<!\w)(?:~|\.{1,2})?(?:\/[\w.-]*\w){2,}\/?/g, ' ')
     .replace(/[ \t]+/g, ' ')
+    .replace(/ ([,.;:!?…])/g, '$1')
     .replace(/\n[ \n]+/g, '\n')
     .trim();
 }
+
+/**
+ * The part of a reply said aloud: the text before the first code block, table, heading, `---` rule or list of more
+ * than two items. That and everything after it stays in the chat, whatever the model was asked to do. `code` is the
+ * language of the code block the reply was cut at ('' when unnamed), null for any other cut.
+ */
+export function oralPart(text: string): { oral: string; cut: boolean; code: string | null } {
+  const lines = text.split('\n');
+  const cutAt = (i: number, code: string | null = null) => ({ oral: lines.slice(0, i).join('\n').trim(), cut: true, code });
+  let listStart = -1;
+  let listItems = 0;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i]!;
+    const fence = /^\s{0,3}(?:```|~~~)\s*([\w+#.-]*)/.exec(line);
+    if (fence) return cutAt(i, fence[1] ?? '');
+    if (/^\s{0,3}#{1,6}\s/.test(line) || /^\s{0,3}([-*_])(?:\s*\1){2,}\s*$/.test(line)) return cutAt(i);
+    if (/^\s*\|.*\|\s*$/.test(line)) return cutAt(i);
+    if (/^\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line)) return cutAt(i > 0 && lines[i - 1]!.includes('|') ? i - 1 : i);
+    if (/^\s{0,3}(?:[-*+•]|\d+[.)])\s+/.test(line)) {
+      if (listItems === 0) listStart = i;
+      if (++listItems > 2) return cutAt(listStart);
+    } else if (line.trim()) {
+      listItems = 0;
+    }
+  }
+  return { oral: text, cut: false, code: null };
+}
+
+/** How a code block's language is said: "Код для PowerShell — в чате." */
+const CODE_NAMES: Record<string, string> = {
+  powershell: 'PowerShell',
+  ps1: 'PowerShell',
+  pwsh: 'PowerShell',
+  bash: 'Bash',
+  sh: 'Bash',
+  zsh: 'Bash',
+  shell: 'Bash',
+  console: 'Bash',
+  python: 'Python',
+  py: 'Python',
+  js: 'JavaScript',
+  javascript: 'JavaScript',
+  jsx: 'JavaScript',
+  ts: 'TypeScript',
+  typescript: 'TypeScript',
+  tsx: 'TypeScript',
+  json: 'JSON',
+  sql: 'SQL',
+  swift: 'Swift',
+  cs: 'C#',
+  csharp: 'C#',
+};
 
 /** Sentence ends we can read aloud before the rest of the reply has streamed in. */
 const SENTENCE_END = /[.!?…]+["»)]?\s+/g;
@@ -151,6 +207,8 @@ const PHRASES = {
     denied: 'Отказал.',
     onScreen: 'Ответьте на экране.',
     rest: 'Остальное — в чате.',
+    code: (name: string | null) => (name ? `Код для ${name} — в чате.` : 'Код — в чате.'),
+    inChat: 'Ответ — в чате.',
     offline: 'Нет связи с Маком.',
   },
   en: {
@@ -160,6 +218,8 @@ const PHRASES = {
     denied: 'Denied.',
     onScreen: 'Please answer on the screen.',
     rest: 'The rest is in the chat.',
+    code: (name: string | null) => (name ? `The ${name} code is in the chat.` : 'The code is in the chat.'),
+    inChat: 'The answer is in the chat.',
     offline: 'The Mac is offline.',
   },
 } as const;
@@ -274,8 +334,8 @@ export interface VoiceCallDeps {
 const SILENCE_MS = 1100;
 /** Silence after an utterance before the soft "thinking" sound starts. */
 const THINKING_SOUND_AFTER_MS = 900;
-/** A reply longer than this is cut short with "the rest is in the chat". */
-const MAX_SPOKEN_PER_TURN = 1200;
+/** About 40 seconds of speech: a longer spoken answer is cut short with "the rest is in the chat". */
+const MAX_SPOKEN_PER_TURN = 550;
 const LOG_LINES = 150;
 
 /**
@@ -613,14 +673,26 @@ export class VoiceCall {
   }
 
   private readItem(item: Extract<ChatItem, { type: 'assistant' }>): void {
-    const clean = speakable(item.text);
+    const part = oralPart(item.text);
+    const clean = speakable(part.oral);
     const done = this.spoken.get(item.key) ?? 0;
-    if (done >= clean.length) return;
-    const pending = clean.slice(done);
-    const { done: full, rest } = completeSentences(pending);
-    const fresh = item.streaming ? full : [...full, rest.trim()].filter(Boolean);
-    this.spoken.set(item.key, item.streaming ? done + pending.length - rest.length : clean.length);
-    for (const sentence of fresh) this.say(sentence, false);
+    // Past a code block or a table the spoken part is complete, even while the rest still streams in.
+    const complete = !item.streaming || part.cut;
+    if (done < clean.length) {
+      const pending = clean.slice(done);
+      const { done: full, rest } = completeSentences(pending);
+      const fresh = complete ? [...full, rest.trim()].filter(Boolean) : full;
+      this.spoken.set(item.key, complete ? clean.length : done + pending.length - rest.length);
+      for (const sentence of fresh) this.say(sentence, false);
+    }
+    if (!part.cut || done === Number.MAX_SAFE_INTEGER) return;
+    this.spoken.set(item.key, Number.MAX_SAFE_INTEGER);
+    if (this.turnCapped) return;
+    // Nothing more of this turn is read: the details are in the chat.
+    const phrases = PHRASES[this.lang];
+    const phrase = this.spokenThisTurn > 0 ? phrases.rest : part.code !== null ? phrases.code(CODE_NAMES[part.code.toLowerCase()] ?? null) : phrases.inChat;
+    this.turnCapped = true;
+    this.say(phrase, true);
   }
 
   private say(text: string, always: boolean): void {

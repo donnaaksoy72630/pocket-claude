@@ -57,7 +57,8 @@ export interface UserTurn {
 /** Prepended to spoken turns. Claude keeps its tools; only the shape of the answer changes. */
 export const VOICE_NOTE = [
   '[Voice call. The user said this aloud and will hear your reply read by text-to-speech.',
-  'Answer in the user\'s language in one to three short spoken sentences: no markdown, no lists, no code blocks, no links.',
+  'Start with the spoken answer: one to three short sentences in the user\'s language, the way a person would say it on the phone, with no markdown, lists, code, commands, paths, links or tables.',
+  'Only that part is read aloud. If details help (code, commands, tables, steps), put them after a line with only --- on it: the phone stops reading there and they stay in the chat. Then say so in the spoken part, for example that the code is in the chat.',
   'If they ask for a command, code or any text to paste, put the exact text on their computer with pc_clipboard_write and say it is on the clipboard, ready for Ctrl+V.',
   'If they ask to look at the screen, take a screenshot with pc_screenshot and tell them what matters. If they ask what they copied, read it with pc_clipboard_read and summarise it.',
   'Before a tool that takes a while, say one short sentence about what you are doing, so the line is not silent.',
