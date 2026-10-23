@@ -82,6 +82,15 @@ final class CallEngine: NSObject {
   private var held = false
   private var thinking = false
   private var observers: [NSObjectProtocol] = []
+  /// The system call (lock screen, Dynamic Island); nil until the first call that uses it.
+  private var bridge: CallKitBridge?
+  /// CallKit activated the session, so CallKit deactivates it too.
+  private var sessionByCallKit = false
+  /// start() waits for the audio: at once without CallKit, until didActivate with it.
+  private var pendingStart: ((Result<[String: Any], Error>) -> Void)?
+  private var activationTimeout: DispatchWorkItem?
+  /// The session as the app had it before the call, restored after it.
+  private var savedSession: (category: AVAudioSession.Category, mode: AVAudioSession.Mode, options: AVAudioSession.CategoryOptions)?
 
   // The audio graph
   private var engine: AVAudioEngine?
@@ -139,9 +148,11 @@ final class CallEngine: NSObject {
   func start(_ config: CallConfig, completion: @escaping (Result<[String: Any], Error>) -> Void) {
     queue.async {
       if self.running { self.shutdown() }
+      self.pendingStart = completion
       do {
-        completion(.success(try self.begin(config)))
+        try self.begin(config)
       } catch {
+        self.pendingStart = nil
         self.shutdown()
         completion(.failure(error))
       }
@@ -184,7 +195,14 @@ final class CallEngine: NSObject {
   }
 
   func setMuted(_ on: Bool) {
-    queue.async { self.mute(on) }
+    queue.async {
+      guard let bridge = self.bridge, bridge.active else {
+        self.mute(on)
+        return
+      }
+      // Through CallKit, so that the system call screen shows it too; the action comes back as onMute.
+      bridge.setMuted(on) { [weak self] in self?.mute(on) }
+    }
   }
 
   func setSpeaker(_ on: Bool) {
@@ -193,7 +211,7 @@ final class CallEngine: NSObject {
 
   // MARK: - Call lifecycle
 
-  private func begin(_ config: CallConfig) throws -> [String: Any] {
+  private func begin(_ config: CallConfig) throws {
     guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: config.language)) else {
       throw CallError(code: "language", message: "Speech recognition does not support \(config.language) on this iPhone.")
     }
@@ -209,41 +227,171 @@ final class CallEngine: NSObject {
     nextRecognitionAt = 0
     restartChain = 0
     rebuiltAt = 0
+    let session = AVAudioSession.sharedInstance()
+    savedSession = (session.category, session.mode, session.categoryOptions)
     do {
       try configureSession(speaker: config.speaker)
-      try AVAudioSession.sharedInstance().setActive(true)
-      sessionActive = true
     } catch {
       throw CallError(code: "audio", message: "Could not start the call audio: \(error.localizedDescription)")
     }
-    try buildEngine()
     running = true
     observeSession()
+    guard config.useCallKit else {
+      try activateAudio(byCallKit: false)
+      return
+    }
+    // CallKit activates the session and calls didActivate, where the engine starts.
+    callKit().start(name: config.callerName) { [weak self] error in
+      self?.callKitStarted(error)
+    }
+    let timeout = DispatchWorkItem { [weak self] in
+      self?.activationTimedOut()
+    }
+    activationTimeout = timeout
+    queue.asyncAfter(deadline: .now() + 4, execute: timeout)
+  }
+
+  /// The session is on, activated by CallKit or by us: the engine starts and the call is on.
+  private func activateAudio(byCallKit: Bool) throws {
+    activationTimeout?.cancel()
+    activationTimeout = nil
+    if !byCallKit {
+      do {
+        try AVAudioSession.sharedInstance().setActive(true)
+      } catch {
+        throw CallError(code: "audio", message: "Could not start the call audio: \(error.localizedDescription)")
+      }
+    }
+    sessionActive = true
+    sessionByCallKit = byCallKit
+    try buildEngine()
     // Sentences JS sent while the call was starting.
     synthesizeNext()
     route = currentRoute()
     emit(["type": "state", "state": "active"])
     emit(["type": "route", "output": route])
     let format = engine?.inputNode.outputFormat(forBus: 0)
+    let callKitOn = bridge?.active == true
     note(
       "audio \(Int(format?.sampleRate ?? 0)) Hz, echo cancellation \(echoCancellation), "
-        + "recognition \(onDevice ? "on device" : "online"), voice \(voice?.name ?? "default"), route \(route)"
+        + "recognition \(onDevice ? "on device" : "online"), voice \(voice?.name ?? "default"), route \(route), "
+        + "CallKit \(callKitOn ? (byCallKit ? "on" : "on, audio started by the app") : "off")"
     )
-    if !recognizer.isAvailable {
+    if let recognizer, !recognizer.isAvailable {
       emit(["type": "recognitionError", "code": "unavailable", "message": "Speech recognition is unavailable right now."])
     }
-    return [
+    bridge?.reportConnected()
+    let pending = pendingStart
+    pendingStart = nil
+    pending?(.success([
       "echoCancellation": echoCancellation,
-      "callKit": false,
+      "callKit": callKitOn,
       "onDevice": onDevice,
       "voice": orNull(voice?.identifier),
       "voiceName": orNull(voice?.name),
       "voiceQuality": orNull(voice.map(CallVoices.quality)),
-    ]
+    ]))
+  }
+
+  private func callKit() -> CallKitBridge {
+    if let bridge { return bridge }
+    let made = CallKitBridge(queue: queue)
+    made.onActivate = { [weak self] in self?.callKitActivated() }
+    made.onDeactivate = { [weak self] in self?.callKitDeactivated() }
+    made.onEnded = { [weak self] in self?.endedOutside() }
+    made.onMute = { [weak self] muted in self?.mute(muted) }
+    made.onHold = { [weak self] on in self?.hold(on) }
+    made.onLog = { [weak self] message in self?.note(message) }
+    bridge = made
+    return made
+  }
+
+  private func callKitStarted(_ error: Error?) {
+    guard let error, running, engine == nil else { return }
+    note("CallKit did not start the call (\(error.localizedDescription)), going on without it")
+    startDirectly()
+  }
+
+  private func activationTimedOut() {
+    guard running, engine == nil else { return }
+    note("CallKit did not activate the audio in time, starting it from the app")
+    startDirectly()
+  }
+
+  private func startDirectly() {
+    do {
+      try activateAudio(byCallKit: false)
+    } catch {
+      failStart(error)
+    }
+  }
+
+  private func failStart(_ error: Error) {
+    let pending = pendingStart
+    pendingStart = nil
+    let wasRunning = running
+    shutdown()
+    if let pending {
+      pending(.failure(error))
+    } else if wasRunning {
+      emit(["type": "error", "code": "audio", "message": error.localizedDescription, "fatal": true])
+    }
+  }
+
+  private func callKitActivated() {
+    guard running else { return }
+    if engine == nil {
+      do {
+        try activateAudio(byCallKit: true)
+      } catch {
+        failStart(error)
+      }
+    } else if engine?.isRunning != true {
+      // Back from a hold or another call: the same engine starts again.
+      sessionActive = true
+      restartAudio("CallKit activated the audio")
+    }
+  }
+
+  private func callKitDeactivated() {
+    guard running, let engine else { return }
+    note("CallKit deactivated the audio")
+    endCapture()
+    // What the players drop now is scheduled again when the audio is back.
+    playbackGeneration += 1
+    engine.stop()
+  }
+
+  /// A phone call came in and the user put this one on hold, or took it back.
+  private func hold(_ on: Bool) {
+    guard running, held != on else { return }
+    held = on
+    note(on ? "call on hold" : "call taken off hold")
+    if on {
+      endCapture()
+      chimePlayer?.stop()
+    } else {
+      updateChime()
+    }
+    emit(["type": "state", "state": on ? "held" : "active"])
+  }
+
+  /// Ended from the lock screen, a headset or by another call.
+  private func endedOutside() {
+    guard running || pendingStart != nil else { return }
+    note("call ended outside the app")
+    let pending = pendingStart
+    pendingStart = nil
+    shutdown()
+    pending?(.failure(CallError(code: "ended", message: "The call was ended.")))
+    emit(["type": "state", "state": "ended", "reason": "remote"])
   }
 
   private func shutdown() {
     running = false
+    activationTimeout?.cancel()
+    activationTimeout = nil
+    bridge?.end()
     for observer in observers {
       NotificationCenter.default.removeObserver(observer)
     }
@@ -268,13 +416,25 @@ final class CallEngine: NSObject {
     restartPending = false
     lastUtterance = nil
     config = nil
-    if sessionActive {
-      sessionActive = false
+    let session = AVAudioSession.sharedInstance()
+    // CallKit deactivates the session it activated.
+    if sessionActive && !sessionByCallKit {
       do {
-        try AVAudioSession.sharedInstance().setActive(false, options: .notifyOthersOnDeactivation)
+        try session.setActive(false, options: .notifyOthersOnDeactivation)
       } catch {
         logger.notice("audio session deactivation: \(error.localizedDescription, privacy: .public)")
       }
+    }
+    sessionActive = false
+    sessionByCallKit = false
+    if let saved = savedSession {
+      savedSession = nil
+      // Videos after the call get the session as it was, not the call's voice-chat setup.
+      try? session.setCategory(saved.category, mode: saved.mode, options: saved.options)
+    }
+    if let pending = pendingStart {
+      pendingStart = nil
+      pending(.failure(CallError(code: "ended", message: "The call has ended.")))
     }
   }
 
@@ -397,6 +557,10 @@ final class CallEngine: NSObject {
       engine.prepare()
       do {
         try engine.start()
+        // What the players still held is scheduled again below, from the first sound not heard yet.
+        playbackGeneration += 1
+        speechPlayer?.stop()
+        chimePlayer?.stop()
         speechPlayer?.play()
         rebuiltAt = uptime()
         noiseFloor = -60
@@ -443,6 +607,11 @@ final class CallEngine: NSObject {
 
   private func interrupted(_ type: AVAudioSession.InterruptionType?) {
     guard running, let type else { return }
+    // CallKit reports holds and the audio coming and going itself.
+    if sessionByCallKit {
+      note("audio interruption \(type == .began ? "began" : "ended") during a CallKit call")
+      return
+    }
     switch type {
     case .began:
       guard !held else { return }
@@ -469,11 +638,19 @@ final class CallEngine: NSObject {
     resume("media services were reset")
   }
 
-  private func resume(_ reason: String) {
+  private func resume(_ reason: String, attempt: Int = 0) {
     do {
       try AVAudioSession.sharedInstance().setActive(true)
     } catch {
-      note("could not resume audio: \(error.localizedDescription)")
+      // Right after a phone call iOS may not hand the audio back yet.
+      guard attempt < 5 else {
+        note("could not resume audio: \(error.localizedDescription)")
+        return
+      }
+      queue.asyncAfter(deadline: .now() + Double(attempt + 1)) { [weak self] in
+        guard let self, self.running, self.held else { return }
+        self.resume(reason, attempt: attempt + 1)
+      }
       return
     }
     held = false
