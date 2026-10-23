@@ -13,6 +13,7 @@ import {
   permissionQuestion,
   recentUserTexts,
   resolveCallLanguage,
+  showsInBackground,
   speakable,
   VoiceCall,
   type CallSnapshot,
@@ -207,6 +208,30 @@ function setup(initialThread: ChatItem[] = [], info?: Partial<EngineInfo>) {
   });
   return { engine, call, sent, decisions, snaps, setOnline: (v: boolean) => (online = v) };
 }
+
+describe('showsInBackground', () => {
+  const snap = (patch: Partial<CallSnapshot>): CallSnapshot => ({
+    phase: 'listening',
+    heard: '',
+    said: '',
+    userSpeaking: false,
+    echoCancellation: true,
+    callKit: true,
+    voiceName: null,
+    voiceQuality: null,
+    route: 'speaker',
+    ...patch,
+  });
+
+  it('re-renders a call in the background only for a new phase or an error', () => {
+    const shown = snap({});
+    expect(showsInBackground(null, shown)).toBe(true);
+    expect(showsInBackground(shown, snap({ heard: 'привет', userSpeaking: true }))).toBe(false);
+    expect(showsInBackground(shown, snap({ said: 'Готово.', route: 'bluetooth' }))).toBe(false);
+    expect(showsInBackground(shown, snap({ phase: 'thinking' }))).toBe(true);
+    expect(showsInBackground(shown, snap({ phase: 'error', error: 'The call audio keeps failing.' }))).toBe(true);
+  });
+});
 
 describe('VoiceCall', () => {
   beforeEach(() => vi.useFakeTimers());

@@ -3,7 +3,7 @@ import type { PermissionRequest } from '@pocket/client-core';
 import type { SessionState } from '@pocket/protocol';
 import { usePathname, useRouter } from 'expo-router';
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
-import { Platform, Pressable, StyleSheet, Text } from 'react-native';
+import { AppState, Platform, Pressable, StyleSheet, Text } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { loadCallPrefs } from './call-prefs';
 import { useAppActive } from './hooks';
@@ -11,7 +11,7 @@ import { personaFor } from './persona';
 import { useSession } from './session';
 import { callLanguageFor, createSpeechEngine } from './speech-engine';
 import { colors } from './theme';
-import { VoiceCall, type CallPhase, type CallSnapshot } from './voice';
+import { showsInBackground, VoiceCall, type CallPhase, type CallSnapshot } from './voice';
 
 interface ActiveCall {
   sessionId: string;
@@ -54,6 +54,24 @@ export function CallProvider({ children }: { children: ReactNode }) {
   const { client } = useSession();
   const [active, setActive] = useState<ActiveCall | null>(null);
   const [snapshot, setSnapshot] = useState<CallSnapshot | null>(null);
+  // With the screen locked the call goes on and nothing is on screen: only phase changes and errors re-render, the
+  // newest snapshot shows when the app is back in front.
+  const latest = useRef<CallSnapshot | null>(null);
+  const shown = useRef<CallSnapshot | null>(null);
+  const foreground = useRef(AppState.currentState === 'active');
+  const show = useCallback((next: CallSnapshot | null) => {
+    latest.current = next;
+    if (next !== null && !foreground.current && !showsInBackground(shown.current, next)) return;
+    shown.current = next;
+    setSnapshot(next);
+  }, []);
+  useEffect(() => {
+    const sub = AppState.addEventListener('change', (state) => {
+      foreground.current = state === 'active';
+      if (foreground.current && latest.current !== shown.current) show(latest.current);
+    });
+    return () => sub.remove();
+  }, [show]);
   const current = useRef<{ sessionId: string; call: VoiceCall; unsubscribe: () => void } | null>(null);
   const token = useRef(0);
 
@@ -71,7 +89,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
       release();
       const mine = ++token.current;
       setActive({ sessionId, startedAt: Date.now() });
-      setSnapshot(null);
+      show(null);
       void loadCallPrefs().then(async (prefs) => {
         const language = await callLanguageFor(prefs.language, client.getState().threads);
         if (mine !== token.current) return;
@@ -80,7 +98,7 @@ export function CallProvider({ children }: { children: ReactNode }) {
           engine: createSpeechEngine(),
           send: (text) => client.send(sessionId, text, undefined, { voice: true }),
           respondPermission: (requestId, decision) => client.respondPermission(requestId, decision),
-          onChange: setSnapshot,
+          onChange: show,
           language,
           voice: prefs.voice,
           callerName: personaFor(sessionId).name,
@@ -107,20 +125,20 @@ export function CallProvider({ children }: { children: ReactNode }) {
           }
         });
         current.current = { sessionId, call, unsubscribe };
-        setSnapshot(call.snapshot());
+        show(call.snapshot());
         void call.start();
         call.onPermissions(forSession(permissions));
       });
     },
-    [client, release],
+    [client, release, show],
   );
 
   const hangUp = useCallback(() => {
     token.current++;
     release();
     setActive(null);
-    setSnapshot(null);
-  }, [release]);
+    show(null);
+  }, [release, show]);
 
   // Ended from the lock screen, a headset or by a failure: stop following the chat, keep the last state to show.
   const over = snapshot?.phase === 'ended' || snapshot?.phase === 'error';

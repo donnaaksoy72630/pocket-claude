@@ -916,6 +916,14 @@ export class VoiceCall {
   }
 }
 
+/**
+ * A call update worth a re-render while the app is in the background (screen locked, another app in front): a new
+ * phase or an error. What was heard and said waits until the app is back; nobody can see it meanwhile.
+ */
+export function showsInBackground(shown: CallSnapshot | null, next: CallSnapshot): boolean {
+  return shown === null || shown.phase !== next.phase || shown.error !== next.error;
+}
+
 const SNAPSHOT_KEYS: (keyof CallSnapshot)[] = [
   'phase',
   'heard',
