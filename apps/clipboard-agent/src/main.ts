@@ -280,12 +280,12 @@ async function main(): Promise<void> {
   switch (cmd ?? (process.stdin.isTTY ? 'install' : 'run')) {
     case 'run':
       return run();
-    case 'pair':
-      if (await pair()) {
-        await control('quit');
-        startHidden();
-      }
+    case 'pair': {
+      // A running agent saves its state on exit, so it has to be gone before the new pairing is written.
+      const wasRunning = (await control('quit')) !== undefined;
+      if ((await pair()) || wasRunning) startHidden();
       return pause();
+    }
     case 'install':
       await install().catch((e: unknown) => console.error(e instanceof Error ? e.message : String(e)));
       return pause();
