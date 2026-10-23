@@ -9,7 +9,7 @@ import { Wordmark } from '../../src/components/Wordmark';
 import { makePosts, makeStories, type Post } from '../../src/content/fake';
 import { pendingCount } from '../../src/direct';
 import { useScreenActive } from '../../src/hooks';
-import { usePowerSaving } from '../../src/power';
+import { useQuietMedia } from '../../src/power';
 import { useChatSelector } from '../../src/session';
 import { colors } from '../../src/theme';
 
@@ -22,7 +22,7 @@ export default function HomeScreen() {
   // A number, not the whole state: the feed must not re-render on every streamed word of a chat.
   const pending = useChatSelector(pendingCount);
   const screenActive = useScreenActive();
-  const powerSaving = usePowerSaving();
+  const quiet = useQuietMedia();
   const stories = useMemo(() => makeStories(), []);
   const [posts, setPosts] = useState<Post[]>(() => makePosts(0, PAGE));
   const [visibleVideo, setVisibleVideo] = useState<string | null>(null);
@@ -40,8 +40,8 @@ export default function HomeScreen() {
     setTimeout(() => setRefreshing(false), 700);
   }, []);
 
-  // Hot phone or Low Power Mode: posters instead of video.
-  const activeId = screenActive && !powerSaving ? visibleVideo : null;
+  // Hot phone, Low Power Mode or a call: posters instead of video.
+  const activeId = screenActive && !quiet ? visibleVideo : null;
 
   return (
     <View style={styles.root}>

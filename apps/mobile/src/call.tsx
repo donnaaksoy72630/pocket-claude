@@ -31,6 +31,8 @@ interface CallContextValue {
 }
 
 const CallContext = createContext<CallContextValue | null>(null);
+/** A call is on: a boolean of its own, so screens that only pause media do not re-render on every word of the call. */
+const CallOnContext = createContext(false);
 
 export const PHASE_LABEL: Record<CallPhase, string> = {
   starting: 'Connecting…',
@@ -146,7 +148,17 @@ export function CallProvider({ children }: { children: ReactNode }) {
     [active, snapshot, start, hangUp],
   );
 
-  return <CallContext.Provider value={value}>{children}</CallContext.Provider>;
+  const on = active !== null && snapshot?.phase !== 'ended' && snapshot?.phase !== 'error';
+  return (
+    <CallContext.Provider value={value}>
+      <CallOnContext.Provider value={on}>{children}</CallOnContext.Provider>
+    </CallContext.Provider>
+  );
+}
+
+/** True while a call is on, whatever screen shows; changes only when a call starts or ends. */
+export function useCallOn(): boolean {
+  return useContext(CallOnContext);
 }
 
 export function useCall(): CallContextValue {
