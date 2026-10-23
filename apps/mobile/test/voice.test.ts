@@ -7,6 +7,7 @@ import {
   holdWords,
   isBargeIn,
   isStopRequest,
+  oralPart,
   parseYesNo,
   permissionQuestion,
   resolveCallLanguage,
@@ -24,6 +25,20 @@ describe('voice helpers', () => {
   it('strips markdown and code from what is read aloud', () => {
     expect(speakable('**Done.** Run `npm test`:\n```sh\nnpm test\n```\n- one\n- two\nSee [docs](https://x.y).')).toBe('Done. Run npm test:\none\ntwo\nSee docs.');
     expect(speakable('Here it is:\n```sh\nstill streaming')).toBe('Here it is:');
+  });
+
+  it('never reads paths or links', () => {
+    expect(speakable('Открой `src/app.ts` и C:\\Users\\me\\x.txt, потом /usr/local/bin.')).toBe('Открой и, потом.');
+    expect(speakable('Запусти `npm test`, 23/10 и и/или остаются.')).toBe('Запусти npm test, 23/10 и и/или остаются.');
+  });
+
+  it('keeps for the chat what follows code, tables, headings, rules and lists of more than two items', () => {
+    expect(oralPart('Да.\n```sh\nls\n```\nЕщё.')).toEqual({ oral: 'Да.', cut: true, code: 'sh' });
+    expect(oralPart('Два шага:\n- один\n- два\nВсё.')).toEqual({ oral: 'Два шага:\n- один\n- два\nВсё.', cut: false, code: null });
+    expect(oralPart('Шаги:\n1. один\n2. два\n3. три')).toEqual({ oral: 'Шаги:', cut: true, code: null });
+    expect(oralPart('Коротко: да.\n---\nПодробности.')).toEqual({ oral: 'Коротко: да.', cut: true, code: null });
+    expect(oralPart('Итог.\n## Детали\nтекст')).toEqual({ oral: 'Итог.', cut: true, code: null });
+    expect(oralPart('Вот так.\nплан | цена\n---|---\nA | 1')).toEqual({ oral: 'Вот так.', cut: true, code: null });
   });
 
   it('reads only complete sentences while streaming', () => {
@@ -296,14 +311,50 @@ describe('VoiceCall', () => {
     expect(engine.texts).toEqual(['Всё работает.']);
   });
 
-  it('cuts a very long reply short and points to the chat', async () => {
+  it('cuts a long spoken answer at about 40 seconds and points to the chat', async () => {
     const { engine, call } = setup();
     await call.start();
     engine.emit({ type: 'final', text: 'расскажи всё' });
     const sentence = `${'Очень длинное предложение про проект '.repeat(5).trim()}.`;
     call.onThread([user('расскажи всё'), reply('a1', Array.from({ length: 12 }, () => sentence).join(' ')), result()], 'idle');
     expect(engine.texts.at(-1)).toBe('Остальное — в чате.');
-    expect(engine.texts.join(' ').length).toBeLessThan(1400);
+    expect(engine.texts.join(' ').length).toBeLessThan(600);
+  });
+
+  it('says the spoken answer and leaves the code to the chat', async () => {
+    const { engine, call } = setup();
+    await call.start();
+    engine.emit({ type: 'final', text: 'дай скрипт' });
+    const answer = 'Готово, скрипт в чате.\n```powershell\nGet-ChildItem C:\\Users\n```\nЗапусти его от администратора.';
+    call.onThread([user('дай скрипт'), reply('a1', answer), result()], 'idle');
+    expect(engine.texts).toEqual(['Готово, скрипт в чате.', 'Остальное — в чате.']);
+  });
+
+  it('stops at the code while the reply still streams, and reads nothing of that turn after it', async () => {
+    const { engine, call } = setup();
+    await call.start();
+    engine.emit({ type: 'final', text: 'покажи' });
+    const asked = user('покажи');
+    call.onThread([asked, reply('a1', 'Сейчас покажу. Вот команда:\n```sh\nls -la', true)], 'running');
+    expect(engine.texts).toEqual(['Сейчас покажу.', 'Вот команда:', 'Остальное — в чате.']);
+    call.onThread([asked, reply('a1', 'Сейчас покажу. Вот команда:\n```sh\nls -la\n```\nОна покажет всё.'), tool(), reply('a2', 'Готово.'), result()], 'idle');
+    expect(engine.texts).toEqual(['Сейчас покажу.', 'Вот команда:', 'Остальное — в чате.']);
+  });
+
+  it('says in one phrase what a reply of only code is', async () => {
+    const { engine, call } = setup();
+    await call.start();
+    engine.emit({ type: 'final', text: 'команда' });
+    call.onThread([user('команда'), reply('a1', '```powershell\nGet-Process | Sort-Object CPU\n```'), result()], 'idle');
+    expect(engine.texts).toEqual(['Код для PowerShell — в чате.']);
+  });
+
+  it('does not read a table out', async () => {
+    const { engine, call } = setup();
+    await call.start();
+    engine.emit({ type: 'final', text: 'сравни' });
+    call.onThread([user('сравни'), reply('a1', 'Вот сравнение.\n| План | Цена |\n|---|---|\n| A | 1 |'), result()], 'idle');
+    expect(engine.texts).toEqual(['Вот сравнение.', 'Остальное — в чате.']);
   });
 
   it('says the Mac is offline instead of losing the question', async () => {
