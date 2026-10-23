@@ -58,17 +58,17 @@ export function CallProvider({ children }: { children: ReactNode }) {
   // newest snapshot shows when the app is back in front.
   const latest = useRef<CallSnapshot | null>(null);
   const shown = useRef<CallSnapshot | null>(null);
-  const foreground = useRef(AppState.currentState === 'active');
   const show = useCallback((next: CallSnapshot | null) => {
     latest.current = next;
-    if (next !== null && !foreground.current && !showsInBackground(shown.current, next)) return;
+    // Only a known background holds updates back: at launch iOS reports 'unknown', and a missed change to 'active'
+    // must not leave the call screen without its live text.
+    if (next !== null && AppState.currentState === 'background' && !showsInBackground(shown.current, next)) return;
     shown.current = next;
     setSnapshot(next);
   }, []);
   useEffect(() => {
     const sub = AppState.addEventListener('change', (state) => {
-      foreground.current = state === 'active';
-      if (foreground.current && latest.current !== shown.current) show(latest.current);
+      if (state !== 'background' && latest.current !== shown.current) show(latest.current);
     });
     return () => sub.remove();
   }, [show]);
