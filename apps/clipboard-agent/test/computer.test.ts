@@ -33,6 +33,11 @@ describe('computer steps for the host', () => {
     expect(timeoutFor({ op: 'keys', combos: [[1], [2]], holdMs: 5000 })).toBe(20_200);
   });
 
+  it('capture the screen with a CopyPixelOperation .NET Framework accepts (a combined value throws there)', () => {
+    expect(COMPUTER_PS).toContain('CopyPixelOperation.SourceCopy);');
+    expect(COMPUTER_PS).not.toMatch(/CopyPixelOperation\.\w+\s*\|/);
+  });
+
   it('keep the script ASCII without backticks, so Windows PowerShell reads it as written', () => {
     expect(/[^\x00-\x7f]/.test(COMPUTER_PS)).toBe(false);
     expect(COMPUTER_PS.includes('`')).toBe(false);

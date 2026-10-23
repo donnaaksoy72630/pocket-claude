@@ -271,7 +271,8 @@ public static class PocketComputer {
   static string Capture(int x, int y, int w, int h, int maxW, int maxH) {
     using (Bitmap full = new Bitmap(w, h, PixelFormat.Format24bppRgb)) {
       using (Graphics g = Graphics.FromImage(full)) {
-        g.CopyFromScreen(x, y, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy | CopyPixelOperation.CaptureBlt);
+        // .NET Framework rejects SourceCopy | CaptureBlt as an undefined CopyPixelOperation value: plain SourceCopy only.
+        g.CopyFromScreen(x, y, 0, 0, new Size(w, h), CopyPixelOperation.SourceCopy);
         DrawCursor(g, x, y);
       }
       double k = Math.Min(1.0, Math.Min((double)maxW / w, (double)maxH / h));
@@ -549,18 +550,51 @@ public static class PocketComputer {
     return "{\"text\":" + Q(text) + "}";
   }
 
+  // A program the shell cannot find by name (not on PATH, e.g. "telegram") is looked up among the Start menu shortcuts.
+  static string StartMenuShortcut(string name) {
+    string want = name.Trim().ToLowerInvariant();
+    if (want.Length == 0 || want.IndexOfAny(new char[] { '\\', '/', ':' }) >= 0) return null;
+    string best = null;
+    int bestRank = int.MaxValue;
+    string[] roots = { Environment.GetFolderPath(Environment.SpecialFolder.StartMenu), Environment.GetFolderPath(Environment.SpecialFolder.CommonStartMenu) };
+    foreach (string root in roots) {
+      if (string.IsNullOrEmpty(root) || !Directory.Exists(root)) continue;
+      string[] links;
+      try { links = Directory.GetFiles(root, "*.lnk", SearchOption.AllDirectories); } catch (Exception) { continue; }
+      foreach (string link in links) {
+        string n = Path.GetFileNameWithoutExtension(link).ToLowerInvariant();
+        if (n.Contains("uninstall")) continue;
+        int rank = n == want ? 0 : n.StartsWith(want) ? 1 : n.Contains(want) ? 2 : -1;
+        if (rank < 0) continue;
+        rank = rank * 1000 + n.Length;
+        if (rank < bestRank) { bestRank = rank; best = link; }
+      }
+    }
+    return best;
+  }
+
   public static string Open(string target, string args) {
+    try {
+      return StartTarget(target, args);
+    } catch (Win32Exception e) {
+      string link = e.NativeErrorCode == 2 ? StartMenuShortcut(target) : null;
+      if (link == null) throw new ArgumentException("Could not open " + target + ": " + e.Message);
+      try {
+        return StartTarget(link, args);
+      } catch (Win32Exception e2) {
+        throw new ArgumentException("Could not open " + target + ": " + e2.Message);
+      }
+    }
+  }
+
+  static string StartTarget(string target, string args) {
     ProcessStartInfo info = new ProcessStartInfo(target);
     if (!string.IsNullOrEmpty(args)) info.Arguments = args;
     info.UseShellExecute = true;
     info.WindowStyle = ProcessWindowStyle.Normal;
     info.WorkingDirectory = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-    try {
-      using (Process p = Process.Start(info)) {
-        return "{\"text\":" + Q(p != null ? "Started " + target + " (process " + p.Id + ")." : "Opened " + target + ".") + "}";
-      }
-    } catch (Win32Exception e) {
-      throw new ArgumentException("Could not open " + target + ": " + e.Message);
+    using (Process p = Process.Start(info)) {
+      return "{\"text\":" + Q(p != null ? "Started " + target + " (process " + p.Id + ")." : "Opened " + target + ".") + "}";
     }
   }
 
