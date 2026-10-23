@@ -66,19 +66,32 @@ export type WindowOp =
   | { op: 'status'; status: OverlayStatus }
   | { op: 'chats'; chats: OverlayChat[] }
   | { op: 'theme'; theme: OverlayTheme }
+  /** The brain put the message typed in the window into the chat. */
+  | { op: 'sent'; text: string }
+  /** It did not: the window keeps the text and shows why. */
+  | { op: 'unsent'; text: string; error: string }
+  /** Trouble after a message went in, such as Claude failing to start. */
+  | { op: 'notice'; text: string }
   | { op: 'quit' };
 
 export interface OverlayModelDeps {
   window: (op: WindowOp) => void;
-  /** Read-only requests to the brain: session.list and session.history. */
+  /** Requests to the brain: session.list, session.history and message.send. */
   request: (body: InnerMessageBody) => void;
   /** Clock for the times in the chat list. */
   now?: () => number;
 }
 
 const NO_CHAT = 'Чатов пока нет';
+/** How long a typed message may wait for the brain to put it into the chat. */
+export const SEND_TIMEOUT_MS = 15_000;
+const NO_REPLY = 'Mac не ответил, сообщение не отправлено. Если так каждый раз — обновите и перезапустите brain на Mac.';
+const OFFLINE = 'Mac не в сети, сообщение не отправлено';
 
-/** Follows the chat the phone is using (or the one picked in the window) and turns its events into drawing ops. */
+/**
+ * Follows the chat the phone is using (or the one picked in the window), turns its events into drawing ops and passes on
+ * what the user writes in the window.
+ */
 export class OverlayModel {
   private readonly sessions = new Map<string, SessionMeta>();
   private readonly threads = new Map<string, ChatItem[]>();
@@ -90,6 +103,8 @@ export class OverlayModel {
   /** What the window shows now, so unchanged status and chat lists are not resent on every streamed word. */
   private shownStatus = '';
   private shownChats = '';
+  /** A message typed in the window, until the brain records it as the chat's next user message. */
+  private pending: { chatId: string; text: string; timer: ReturnType<typeof setTimeout> } | undefined;
 
   constructor(
     private readonly deps: OverlayModelDeps,
@@ -116,7 +131,18 @@ export class OverlayModel {
 
   offline(): void {
     this.macOnline = false;
+    this.unsent(OFFLINE);
     this.pushStatus();
+  }
+
+  /** The user wrote in the window: the text goes into the chat like a message typed on the phone. */
+  send(chatId: string, text: string): void {
+    const body = text.trim();
+    if (this.pending) return this.deps.window({ op: 'unsent', text: body, error: 'Предыдущее сообщение ещё отправляется' });
+    const error = !body ? 'Пустое сообщение' : !this.macOnline ? OFFLINE : !this.sessions.has(chatId) ? 'Этого чата больше нет' : undefined;
+    if (error) return this.deps.window({ op: 'unsent', text: body, error });
+    this.pending = { chatId, text: body, timer: setTimeout(() => this.unsent(NO_REPLY), SEND_TIMEOUT_MS) };
+    this.deps.request({ type: 'message.send', payload: { sessionId: chatId, text: body } });
   }
 
   /** The user picked a chat in the window's list. */
@@ -218,11 +244,33 @@ export class OverlayModel {
           this.pushStatus();
         }
         this.pushChats();
+        // The brain records what it was sent word for word: seeing it come back means it is in the chat.
+        const p = this.pending;
+        if (p && event.kind === 'user' && sessionId === p.chatId && event.text === p.text) {
+          clearTimeout(p.timer);
+          this.pending = undefined;
+          this.deps.window({ op: 'sent', text: p.text });
+        }
+        return;
+      }
+      case 'error': {
+        const { code, message: text } = message.payload;
+        const error = code === 'unknown_session' ? 'Этого чата нет на Mac' : code === 'claude_failed' ? `Claude не запустился: ${text}` : text;
+        if (this.pending) this.unsent(error);
+        else this.deps.window({ op: 'notice', text: error });
         return;
       }
       default:
         return;
     }
+  }
+
+  private unsent(error: string): void {
+    const p = this.pending;
+    if (!p) return;
+    clearTimeout(p.timer);
+    this.pending = undefined;
+    this.deps.window({ op: 'unsent', text: p.text, error });
   }
 
   private now(): number {

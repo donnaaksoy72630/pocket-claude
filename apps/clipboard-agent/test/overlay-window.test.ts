@@ -65,9 +65,9 @@ describe('OverlayWindow', () => {
   it('parses events from stdout and logs everything else', async () => {
     const { win, children, events, logs } = setup();
     win.start();
-    children[0]?.stdout.write('{"ev":"copied","what":"code"}\nnot json\n{"ev":"open","id":"c1"}\n{"ev":"error","message":"bad"}\n');
+    children[0]?.stdout.write('{"ev":"copied","what":"code"}\nnot json\n{"ev":"open","id":"c1"}\n{"ev":"send","chatId":"c1","text":"hi"}\n{"ev":"error","message":"bad"}\n');
     await vi.advanceTimersByTimeAsync(0);
-    expect(events).toEqual([{ ev: 'copied', what: 'code' }, { ev: 'open', id: 'c1' }, { ev: 'error', message: 'bad' }]);
+    expect(events).toEqual([{ ev: 'copied', what: 'code' }, { ev: 'open', id: 'c1' }, { ev: 'send', chatId: 'c1', text: 'hi' }, { ev: 'error', message: 'bad' }]);
     expect(logs).toEqual(['overlay: not json', 'overlay error: bad']);
   });
 

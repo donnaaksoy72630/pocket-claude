@@ -71,10 +71,22 @@ const events: WindowEvent[] = [];
 const problems: string[] = [];
 const waiters: { from: number; pred: (e: WindowEvent) => boolean; done: (e: WindowEvent) => void }[] = [];
 
+/** Plays the brain: lists, histories, and a message typed in the window coming back with Claude's answer. */
 function answer(body: InnerMessageBody): void {
   setTimeout(() => {
     if (body.type === 'session.list') model.handle({ type: 'session.list.result', payload: { sessions } });
     if (body.type === 'session.history') model.handle({ type: 'session.history.result', payload: { sessionId: body.payload.sessionId, events: histories[body.payload.sessionId] ?? [] } });
+    if (body.type === 'message.send') {
+      const { sessionId, text } = body.payload;
+      const reply: SessionEvent[] = [
+        { kind: 'user', text, from: 'pc' },
+        { kind: 'tool_result', id: 'live1', content: 'Tests: 31 passed', isError: false },
+        { kind: 'text_delta', text: 'Добавил тест: ' },
+        { kind: 'text', text: 'Добавил тест: `TypingBubble` теперь рендерится дважды подряд без ошибки.' },
+        { kind: 'state', state: 'idle' },
+      ];
+      reply.forEach((event, i) => setTimeout(() => model.handle({ type: 'session.event', payload: { sessionId, event } }), i * 200));
+    }
   }, 50);
 }
 
@@ -89,6 +101,7 @@ const overlay = new OverlayWindow({
     console.log('event', JSON.stringify(e));
     events.push(e);
     if (e.ev === 'open') model.open(e.id);
+    if (e.ev === 'send') model.send(e.chatId, e.text);
     if (e.ev === 'theme') model.setTheme(e.theme);
     for (const w of [...waiters]) {
       if (events.length - 1 < w.from || !w.pred(e)) continue;
@@ -121,6 +134,7 @@ function ps(script: string): string {
 }
 
 const UIA = [
+  '[Console]::OutputEncoding = [Text.Encoding]::UTF8',
   'Add-Type -AssemblyName UIAutomationClient, UIAutomationTypes, System.Drawing',
   '$A = [System.Windows.Automation.AutomationElement]',
   "$win = $A::RootElement.FindFirst([System.Windows.Automation.TreeScope]::Children, (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Pocket')))",
@@ -135,6 +149,16 @@ if (-not $el) { throw 'no element ${id}' }`;
 async function click(id: string): Promise<void> {
   ps(`${UIA}\n${find(id)}\n$el.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()`);
   await sleep(700);
+}
+
+/** Types into a text field the way a screen reader would: no keyboard, so the editor keeps its focus. */
+async function setValue(id: string, text: string): Promise<void> {
+  ps(`${UIA}\n${find(id)}\n$el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).SetValue('${text.replace(/'/g, "''")}')`);
+  await sleep(400);
+}
+
+function valueOf(id: string): string {
+  return ps(`${UIA}\n${find(id)}\n$el.GetCurrentPattern([System.Windows.Automation.ValuePattern]::Pattern).Current.Value`).trim();
 }
 
 /** Scrolls the transcript: 0 is the top, 100 the bottom. */
@@ -216,13 +240,26 @@ async function main(): Promise<void> {
   await sleep(800);
   shot('07-live');
 
+  // Writing from the window: the text goes out through the model and comes back as the chat's next message.
+  const typed = 'Спасибо! Теперь добавь тест на TypingBubble.';
+  await setValue('composer', typed);
+  shot('08-typing');
+  const sent = next((e) => e.ev === 'send', 3000, 'the send button');
+  await click('send');
+  const send = await sent;
+  if (send.ev !== 'send' || send.chatId !== MAIN || send.text !== typed) problems.push(`unexpected send event ${JSON.stringify(send)}`);
+  await sleep(1800);
+  const left = valueOf('composer');
+  if (left !== '') problems.push(`the input field still holds ${JSON.stringify(left)} after sending`);
+  shot('09-sent');
+
   const themed = next((e) => e.ev === 'theme', 3000, 'the theme switch');
   await click('theme');
   await themed;
   await sleep(600);
-  shot('08-light');
+  shot('10-light');
   await click('chats');
-  shot('09-light-chats');
+  shot('11-light-chats');
   await click('chats');
 
   const hidden = next((e) => e.ev === 'visible' && !e.visible, 3000, 'the hide button');

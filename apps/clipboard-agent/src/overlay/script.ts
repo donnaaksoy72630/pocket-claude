@@ -1,7 +1,8 @@
 /**
  * The overlay window: Windows PowerShell 5.1 hosting a WPF window written in C# (compiled by Add-Type at start), driven by
- * the agent over stdin/stdout (one JSON object per line). Read-only: it shows the chat and copies text; besides copies and
- * the theme it only reports which chat to show. Double-tap Alt shows it, a single Alt tap (or Esc) hides it.
+ * the agent over stdin/stdout (one JSON object per line). It shows the chat, copies text, and hands what the user types to
+ * the agent, which sends it to the chat on screen. Double-tap Alt shows it without taking focus; a click into the input
+ * field focuses it for typing. A single Alt tap (or Esc) hides it.
  *
  * Kept as a string so the single-file PocketClipboard.exe can write it next to its state and run it. Because this is a
  * JS template literal the code must avoid backticks and the dollar-brace sequence. Add-Type compiles with the C# 5
@@ -93,7 +94,7 @@ namespace PocketOverlay
 
     public sealed class Overlay
     {
-        const double WinWidth = 460, CompactHeight = 600, Gap = 12, DrawerWidth = 300;
+        const double WinWidth = 460, CompactHeight = 640, Gap = 12, DrawerWidth = 300;
         // Long chats draw their last messages first; older ones come on demand, so opening a chat stays quick.
         const int RenderLimit = 150;
         const string BareXaml =
@@ -148,6 +149,13 @@ namespace PocketOverlay
         Border drawer, scrim;
         TranslateTransform drawerShift;
         DispatcherTimer flashTimer;
+        TextBox composer;
+        TextBlock composerHint, sendError, sendIcon;
+        Border composerBox, sendBox;
+        Button sendButton;
+        // What is typed survives a theme switch, which rebuilds the window.
+        string draft = "";
+        bool sending;
 
         IList chats = None;
         string chatId = "", titleText = "Pocket", statusText = "", statusTone = "idle";
@@ -236,6 +244,7 @@ namespace PocketOverlay
 
         void Build()
         {
+            if (composer != null) draft = composer.Text;
             win.Background = P.Bg;
             var root = new Grid();
             root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -365,21 +374,162 @@ namespace PocketOverlay
 
         FrameworkElement BuildFooter()
         {
-            var g = new Grid { Height = 46, Background = P.Bar };
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
-            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            var tools = new Grid { Height = 38 };
+            tools.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            tools.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            tools.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
             flashBlock = OneLine("", P.Muted, 12);
             flashBlock.VerticalAlignment = VerticalAlignment.Center;
             flashBlock.Margin = new Thickness(14, 0, 8, 0);
-            Put(g, flashBlock, 0, 0);
+            Put(tools, flashBlock, 0, 0);
             var code = TextButton("\uE943", "Копировать код", "copy-code", CopyCode, 12.5);
             code.Margin = new Thickness(0, 0, 2, 0);
-            Put(g, code, 1, 0);
+            Put(tools, code, 1, 0);
             var reply = TextButton("\uE8C8", "Копировать ответ", "copy-reply", CopyReply, 12.5);
             reply.Margin = new Thickness(0, 0, 8, 0);
-            Put(g, reply, 2, 0);
-            return new Border { BorderBrush = P.Edge, BorderThickness = new Thickness(0, 1, 0, 0), Child = g };
+            Put(tools, reply, 2, 0);
+            sendError = new TextBlock
+            {
+                Foreground = P.Error, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(16, 0, 16, 6),
+                Visibility = Visibility.Collapsed,
+            };
+            AutomationProperties.SetAutomationId(sendError, "send-error");
+            var panel = new StackPanel { Background = P.Bar };
+            panel.Children.Add(tools);
+            panel.Children.Add(sendError);
+            panel.Children.Add(BuildComposer());
+            return new Border { BorderBrush = P.Edge, BorderThickness = new Thickness(0, 1, 0, 0), Child = panel };
+        }
+
+        // ---------------------------------------------------------------- writing to the chat
+
+        FrameworkElement BuildComposer()
+        {
+            var g = new Grid { Margin = new Thickness(10, 0, 10, 10) };
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            g.ColumnDefinitions.Add(new ColumnDefinition { Width = GridLength.Auto });
+            composer = new TextBox
+            {
+                AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 22, MaxHeight = 132, Padding = new Thickness(0),
+                VerticalScrollBarVisibility = ScrollBarVisibility.Auto, HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
+                BorderThickness = new Thickness(0), Background = Brushes.Transparent, Foreground = P.Text, CaretBrush = P.Text,
+                SelectionBrush = P.Accent, FontSize = 14, VerticalContentAlignment = VerticalAlignment.Center, Text = draft,
+            };
+            composer.CaretIndex = draft.Length;
+            AutomationProperties.SetAutomationId(composer, "composer");
+            AutomationProperties.SetName(composer, "Сообщение для Claude");
+            composer.PreviewKeyDown += OnComposerKey;
+            composer.TextChanged += delegate
+            {
+                if (!sending) ClearSendError();
+                UpdateComposer();
+            };
+            composer.GotKeyboardFocus += delegate { composerBox.BorderBrush = P.Accent; };
+            composer.LostKeyboardFocus += delegate { composerBox.BorderBrush = P.Edge; };
+            composerHint = new TextBlock
+            {
+                Foreground = P.Faint, FontSize = 14, Margin = new Thickness(2, 0, 0, 0), VerticalAlignment = VerticalAlignment.Center,
+                IsHitTestVisible = false, TextTrimming = TextTrimming.CharacterEllipsis,
+            };
+            var field = new Grid();
+            field.Children.Add(composerHint);
+            field.Children.Add(composer);
+            composerBox = new Border
+            {
+                Background = P.ChipBg, BorderBrush = P.Edge, BorderThickness = new Thickness(1), CornerRadius = new CornerRadius(19),
+                Padding = new Thickness(14, 7, 10, 7), MinHeight = 38, Cursor = Cursors.IBeam, Child = field,
+            };
+            // A click on the padding around the text focuses it too.
+            composerBox.MouseLeftButtonDown += delegate { composer.Focus(); };
+            Put(g, composerBox, 0, 0);
+            sendIcon = Icon("\uE724", P.Faint, 14);
+            sendIcon.HorizontalAlignment = HorizontalAlignment.Center;
+            sendIcon.Margin = new Thickness(2, 0, 0, 0);
+            sendBox = new Border { Width = 38, Height = 38, CornerRadius = new CornerRadius(19), Child = sendIcon };
+            sendButton = MakeButton(sendBox, "send", "Отправить", Send);
+            sendButton.ToolTip = "Отправить: Enter. Новая строка: Shift+Enter";
+            sendButton.Margin = new Thickness(8, 0, 0, 0);
+            sendButton.VerticalAlignment = VerticalAlignment.Bottom;
+            Put(g, sendButton, 1, 0);
+            return g;
+        }
+
+        bool CanWrite()
+        {
+            return chatId.Length > 0 && statusTone != "offline";
+        }
+
+        void UpdateComposer()
+        {
+            if (composer == null) return;
+            bool can = CanWrite();
+            composer.IsReadOnly = sending;
+            composerBox.Opacity = sending ? 0.6 : 1;
+            composerHint.Text = chatId.Length == 0 ? "Чата нет: начните его на телефоне" : statusTone == "offline" ? "Mac не в сети" : "Написать Claude…";
+            composerHint.Visibility = composer.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
+            bool ready = can && !sending && composer.Text.Trim().Length > 0;
+            sendButton.IsEnabled = ready;
+            sendButton.Cursor = ready ? Cursors.Hand : Cursors.Arrow;
+            sendBox.Background = ready ? P.Accent : P.ChipBg;
+            sendIcon.Foreground = ready ? Brushes.White : P.Faint;
+            sendIcon.Text = sending ? "\uE712" : "\uE724";
+        }
+
+        void OnComposerKey(object sender, KeyEventArgs e)
+        {
+            if (e.Key != Key.Enter || (Keyboard.Modifiers & ModifierKeys.Shift) != 0) return;
+            e.Handled = true;
+            Send();
+        }
+
+        void Send()
+        {
+            if (composer == null || sending) return;
+            string text = composer.Text.Trim();
+            if (text.Length == 0) return;
+            if (!CanWrite())
+            {
+                ShowSendError(chatId.Length == 0 ? "Чата нет: начните его на телефоне." : "Mac не в сети, отправить нельзя.");
+                return;
+            }
+            sending = true;
+            ClearSendError();
+            UpdateComposer();
+            Emit("send", "chatId", chatId, "text", text);
+        }
+
+        // The message is in the chat: its bubble arrives with the chat's events, the field empties.
+        void Sent(string text)
+        {
+            sending = false;
+            if (composer.Text.Trim() == text) composer.Text = "";
+            draft = "";
+            autoScroll = true;
+            win.Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(ScrollToEnd));
+            UpdateComposer();
+        }
+
+        void Unsent(string text, string error)
+        {
+            sending = false;
+            if (composer.Text.Length == 0 && text.Length > 0)
+            {
+                composer.Text = text;
+                composer.CaretIndex = text.Length;
+            }
+            ShowSendError(error);
+            UpdateComposer();
+        }
+
+        void ShowSendError(string text)
+        {
+            sendError.Text = text;
+            sendError.Visibility = text.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+        }
+
+        void ClearSendError()
+        {
+            if (sendError != null && sendError.Visibility == Visibility.Visible) ShowSendError("");
         }
 
         Button MakeButton(object content, string id, string name, Action click)
@@ -435,6 +585,7 @@ namespace PocketOverlay
             statusBlock.Foreground = statusTone == "idle" || statusTone.Length == 0 ? P.Muted : ToneBrush(statusTone);
             statusDot.Fill = ToneBrush(statusTone);
             statusLine.Visibility = statusText.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
+            UpdateComposer();
         }
 
         Brush ToneBrush(string tone)
@@ -506,6 +657,9 @@ namespace PocketOverlay
                 case "status": SetStatus(D(op, "status")); break;
                 case "chats": chats = L(op, "chats") ?? None; chatsDirty = true; break;
                 case "theme": SetTheme(S(op, "theme")); break;
+                case "sent": Sent(S(op, "text")); break;
+                case "unsent": Unsent(S(op, "text"), S(op, "error")); break;
+                case "notice": ShowSendError(S(op, "text")); break;
                 case "quit": Application.Current.Shutdown(); break;
             }
         }
@@ -520,6 +674,7 @@ namespace PocketOverlay
                 open.Clear();
                 selectedId = null;
                 autoScroll = true;
+                ClearSendError();
             }
             chatId = id;
             titleText = S(op, "title");
@@ -535,6 +690,7 @@ namespace PocketOverlay
             }
             renderFrom = Math.Max(0, rows.Count - RenderLimit);
             fullRender = true;
+            UpdateComposer();
         }
 
         void Upsert(IDictionary<string, object> m)

@@ -2,10 +2,10 @@ import { execFileSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { SessionEvent, SessionMeta } from '@pocket/protocol';
 import { firstWords, plural } from '../src/overlay/actions.js';
-import { OverlayModel, whenLabel, type OverlayMessage, type WindowOp } from '../src/overlay/model.js';
+import { OverlayModel, SEND_TIMEOUT_MS, whenLabel, type OverlayMessage, type WindowOp } from '../src/overlay/model.js';
 import { OVERLAY_PS, OVERLAY_PS_FILE } from '../src/overlay/script.js';
 
 function setup(now?: () => number) {
@@ -13,7 +13,8 @@ function setup(now?: () => number) {
   const requests: string[] = [];
   const model = new OverlayModel({
     window: (op) => ops.push(op),
-    request: (b) => requests.push(b.type === 'session.history' ? `history:${b.payload.sessionId}` : b.type),
+    request: (b) =>
+      requests.push(b.type === 'session.history' ? `history:${b.payload.sessionId}` : b.type === 'message.send' ? `send:${b.payload.sessionId}:${b.payload.text}` : b.type),
     ...(now ? { now } : {}),
   });
   /** The newest op of a kind: events also refresh the status line and the chat list. */
@@ -275,6 +276,61 @@ describe('OverlayModel', () => {
   });
 });
 
+describe('writing from the window', () => {
+  afterEach(() => vi.useRealTimers());
+
+  it('sends the text to the chat and confirms once the brain has put it in', () => {
+    const { model, ops, requests, upserts } = setup();
+    model.handle(list(meta('a', 1)));
+    model.handle(history('a', []));
+    model.send('a', '  Привет с ПК\n');
+    expect(requests.at(-1)).toBe('send:a:Привет с ПК');
+    // Somebody else's message in the meantime is not the echo.
+    model.handle(event('a', { kind: 'user', text: 'с телефона', from: 'phone' }));
+    expect(ops.some((o) => o.op === 'sent' || o.op === 'unsent')).toBe(false);
+    model.handle(event('a', { kind: 'user', text: 'Привет с ПК', from: 'pc' }));
+    expect(upserts().at(-1)).toMatchObject({ role: 'user', text: 'Привет с ПК' });
+    expect(ops.at(-1)).toEqual({ op: 'sent', text: 'Привет с ПК' });
+  });
+
+  it('gives the text back when it cannot go: empty, no chat, an error, no answer, Mac offline', () => {
+    vi.useFakeTimers();
+    const { model, requests, latest } = setup();
+    model.handle(list(meta('a', 1)));
+    model.handle(history('a', []));
+    model.send('a', '   ');
+    expect(latest('unsent')).toEqual({ op: 'unsent', text: '', error: 'Пустое сообщение' });
+    model.send('gone', 'hi');
+    expect(latest('unsent')).toEqual({ op: 'unsent', text: 'hi', error: 'Этого чата больше нет' });
+
+    model.send('a', 'first');
+    model.send('a', 'second');
+    expect(latest('unsent')).toEqual({ op: 'unsent', text: 'second', error: 'Предыдущее сообщение ещё отправляется' });
+    model.handle({ type: 'error', payload: { code: 'unknown_session', message: 'Session not found' } });
+    expect(latest('unsent')).toEqual({ op: 'unsent', text: 'first', error: 'Этого чата нет на Mac' });
+
+    model.send('a', 'into the void');
+    vi.advanceTimersByTime(SEND_TIMEOUT_MS - 1);
+    expect(latest('unsent').text).toBe('first');
+    vi.advanceTimersByTime(1);
+    expect(latest('unsent')).toMatchObject({ text: 'into the void', error: expect.stringContaining('Mac не ответил') });
+
+    model.send('a', 'cut off');
+    model.offline();
+    expect(latest('unsent')).toEqual({ op: 'unsent', text: 'cut off', error: 'Mac не в сети, сообщение не отправлено' });
+    model.send('a', 'still offline');
+    expect(latest('unsent')).toEqual({ op: 'unsent', text: 'still offline', error: 'Mac не в сети, сообщение не отправлено' });
+    expect(requests.filter((r) => r.startsWith('send:'))).toEqual(['send:a:first', 'send:a:into the void', 'send:a:cut off']);
+  });
+
+  it('reports trouble that comes after the message went in', () => {
+    const { model, ops } = setup();
+    model.handle(list(meta('a', 1)));
+    model.handle({ type: 'error', payload: { code: 'claude_failed', message: 'spawn claude ENOENT' } });
+    expect(ops.at(-1)).toEqual({ op: 'notice', text: 'Claude не запустился: spawn claude ENOENT' });
+  });
+});
+
 describe('action labels', () => {
   it('keeps the first three words, the end of long paths and the host of URLs', () => {
     expect(firstWords('pnpm test --filter mobile')).toBe('pnpm test --filter…');
@@ -311,6 +367,7 @@ describe('overlay script', () => {
     expect(script).not.toMatch(/\$\{/);
     expect(OVERLAY_PS).toContain('GetAsyncKeyState');
     expect(OVERLAY_PS).toContain('ShowActivated = false');
+    expect(OVERLAY_PS).toContain('Emit("send", "chatId", chatId, "text", text)');
     // Features the .NET Framework C# compiler behind Add-Type does not know.
     expect(OVERLAY_PS).not.toMatch(/\?\.|\$"|nameof\(/);
   });

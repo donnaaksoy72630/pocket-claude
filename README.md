@@ -12,7 +12,7 @@ Everything between devices is end-to-end encrypted; the relay only sees cipherte
 | `apps/relay` | Relay: Cloudflare Worker (`worker.ts`) or Node server (`node-server.ts`) on the same core. Routing, offline queues, pairing. The Node server also serves the Mini App. |
 | `apps/mobile` | Expo / React Native app (Android, iPhone) and, as a web build, the Telegram Mini App. The chat is in Direct. |
 | `apps/executor-extension` | VS Code extension: executes tool calls in the open workspace, has a chat panel. |
-| `apps/clipboard-agent` | `PocketClipboard.exe` for Windows: shares the clipboard with the phone and shows AI replies in a small overlay window in the corner (double-tap Alt shows it, one Alt tap or Esc hides it; dark or light). |
+| `apps/clipboard-agent` | `PocketClipboard.exe` for Windows: shares the clipboard with the phone and shows the chat with Claude in a small overlay window in the corner, where you can also write to it (double-tap Alt shows it, one Alt tap or Esc hides it; dark or light). |
 | `apps/telegram-bot` | Telegram bot run by the brain daemon (`pocket-claude telegram <token>`): a permanent keyboard for the PC clipboard, screenshots and chats with Claude, “Code → PC” / “Reply → PC” under every reply, one linked account per person; opens the Mini App. |
 | `packages/protocol` | Crypto, envelopes, message schemas, pairing. |
 | `packages/transport` | `DeviceLink` (authenticated, encrypted WebSocket link) and `joinAccount` (pairing). |
