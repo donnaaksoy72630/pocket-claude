@@ -10,6 +10,7 @@ import { Avatar } from '../../src/components/Avatar';
 import { ClaudeAvatar } from '../../src/components/ClaudeAvatar';
 import { makeConversations, makeNotes, OWN, type FakeConversation } from '../../src/content/fake';
 import { connectionBanner, isActiveNow } from '../../src/direct';
+import { useScreenActive } from '../../src/hooks';
 import { personaFor } from '../../src/persona';
 import { relativeTime } from '../../src/format';
 import { useChatSelector, useSession } from '../../src/session';
@@ -114,10 +115,15 @@ export default function DirectInbox() {
   const [showHidden, setShowHidden] = useState(false);
   const fakes = useMemo(() => makeConversations(), []);
 
+  // "5 min ago" ticks only while the list is on screen: under an open chat or with the app away it would wake the
+  // phone for nothing.
+  const screenActive = useScreenActive();
   useEffect(() => {
+    if (!screenActive) return;
+    setNow(Date.now());
     const t = setInterval(() => setNow(Date.now()), 30_000);
     return () => clearInterval(t);
-  }, []);
+  }, [screenActive]);
 
   const refresh = useCallback(() => {
     setRefreshing(true);

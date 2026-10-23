@@ -10,11 +10,14 @@ import { ClaudeAvatar } from '../../src/components/ClaudeAvatar';
 import { effortLabel, modelLabel } from '../../src/commands';
 import { bareToolName, STATE_COLOR, STATE_LABEL, toolIcon, toolSummary } from '../../src/format';
 import { useScreenActive } from '../../src/hooks';
-import { useChatSelector, useChatState, useSession } from '../../src/session';
+import { usePowerSaving } from '../../src/power';
+import { useChatSelector, useSession } from '../../src/session';
 import { colors, mono } from '../../src/theme';
 
 // The Mac reports running agents; every 3 s is live enough and halves the traffic.
 const POLL_MS = 3000;
+/** Hot phone or Low Power Mode: fresh enough this often, and the timers tick every 5 s. */
+const POLL_SAVING_MS = 10_000;
 
 function elapsed(since: number, now: number): string {
   const s = Math.max(0, Math.floor((now - since) / 1000));
@@ -155,30 +158,37 @@ export default function ActivityScreen() {
   const insets = useSafeAreaInsets();
   const router = useRouter();
   const { client } = useSession();
-  const state = useChatState();
+  // Field by field: the screen stays open while chats stream, and must not re-render for every word.
+  const activity = useChatSelector((s) => s.activity);
+  const modelsCount = useChatSelector((s) => s.models.length);
+  const connection = useChatSelector((s) => s.connection);
+  const brainOnline = useChatSelector((s) => s.brainOnline);
+  const host = useChatSelector((s) => s.host);
+  const computers = useChatSelector((s) => s.computers);
+  const activeComputer = useChatSelector((s) => s.activeComputer);
   const active = useScreenActive();
+  const powerSaving = usePowerSaving();
   const [now, setNow] = useState(Date.now());
-  const activity = state.activity;
 
   useEffect(() => {
     if (!active || !client) return;
     client.loadActivity();
-    if (state.models.length === 0) client.loadModels();
-    const poll = setInterval(() => client.loadActivity(), POLL_MS);
-    const tick = setInterval(() => setNow(Date.now()), 1000);
+    if (modelsCount === 0) client.loadModels();
+    const poll = setInterval(() => client.loadActivity(), powerSaving ? POLL_SAVING_MS : POLL_MS);
+    const tick = setInterval(() => setNow(Date.now()), powerSaving ? 5000 : 1000);
     return () => {
       clearInterval(poll);
       clearInterval(tick);
     };
-  }, [active, client, state.models.length]);
+  }, [active, client, modelsCount, powerSaving]);
 
   const sessions = activity?.sessions ?? [];
   const subagents = sessions.reduce((n, s) => n + (s.agents?.length ?? 0), 0);
   const tasks = sessions.reduce((n, s) => n + s.runningTools.filter((t) => t.name !== 'Agent').length + (s.background?.length ?? 0), 0);
   const plural = (n: number, word: string) => `${n} ${word}${n === 1 ? '' : 's'}`;
-  const macOnline = state.connection === 'online' && state.brainOnline;
-  const winOnline = macOnline && (activity?.executor.online ?? state.host?.executorOnline ?? false);
-  const workspaces = activity?.executor.workspaces ?? state.host?.workspaces ?? [];
+  const macOnline = connection === 'online' && brainOnline;
+  const winOnline = macOnline && (activity?.executor.online ?? host?.executorOnline ?? false);
+  const workspaces = activity?.executor.workspaces ?? host?.workspaces ?? [];
 
   const stopEverything = () =>
     alert('Stop everything?', 'Kills all Claude processes on the Mac and all running commands on the Windows laptop.', [
@@ -211,22 +221,22 @@ export default function ActivityScreen() {
       <ScrollView contentContainerStyle={[styles.content, { paddingBottom: insets.bottom + 24 }]}>
         <View style={styles.devices}>
           <Device icon="laptop-outline" name="Mac" online={macOnline} detail={activity?.claudeVersion ? `Claude Code ${activity.claudeVersion}` : undefined} />
-          {state.computers.length === 0 ? <Device icon="desktop-outline" name="Windows" online={winOnline} detail={activity?.executor.os} /> : null}
+          {computers.length === 0 ? <Device icon="desktop-outline" name="Windows" online={winOnline} detail={activity?.executor.os} /> : null}
         </View>
-        {state.computers.length > 0 ? (
+        {computers.length > 0 ? (
           <View style={styles.devices}>
-            {state.computers.map((c) => (
+            {computers.map((c) => (
               <Device
                 key={c.deviceId}
                 icon="desktop-outline"
-                name={c.deviceId === state.activeComputer ? `${c.name} ★` : c.name}
+                name={c.deviceId === activeComputer ? `${c.name} ★` : c.name}
                 online={macOnline && c.online}
                 detail={c.workspaces[0]?.split(/[\\/]/).pop()}
               />
             ))}
           </View>
         ) : null}
-        {state.computers.length === 0 && winOnline && workspaces.length > 0 ? (
+        {computers.length === 0 && winOnline && workspaces.length > 0 ? (
           <View style={styles.workspaces}>
             {workspaces.map((w) => (
               <Text key={w} style={styles.workspace} numberOfLines={1} ellipsizeMode="head">
