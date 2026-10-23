@@ -56,6 +56,14 @@ jobs:
           echo '::group::Warnings in the call engine'
           grep -E 'warning: .*modules/pocket-call' build.log | sort -u | head -n 60 || true
           echo '::endgroup::'
+          # The app also builds without the call engine (the JS falls back to JsSpeechEngine), which is how it went
+          # missing once: make sure it was compiled in.
+          steps=$(grep -c "in target 'PocketCall' from project 'Pods'" build.log || true)
+          echo "PocketCall build steps: $steps"
+          if [ "$steps" -eq 0 ]; then
+            echo '::error::The call engine (modules/pocket-call, pod PocketCall) was not compiled into the app'
+            exit 1
+          fi
           tail -n 5 build.log
       - name: Keep the build log
         if: failure()
