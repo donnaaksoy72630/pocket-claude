@@ -3,6 +3,14 @@ import { newMessageId, type PermissionDecision } from '@pocket/protocol';
 
 export const PERMISSION_TIMEOUT_MS = 10 * 60_000;
 
+/** The pseudo tool Claude Code asks about when a sandboxed command wants a host outside the allow list; input `{ host }`. */
+export const SANDBOX_NETWORK_TOOL = 'SandboxNetworkAccess';
+
+/** What "allow for this chat" remembers: the tool, or for network access just that one host. */
+export function allowKey(toolName: string, input: Record<string, unknown>): string {
+  return toolName === SANDBOX_NETWORK_TOOL && typeof input.host === 'string' ? `${toolName}:${input.host.toLowerCase()}` : toolName;
+}
+
 interface Pending {
   sessionId: string;
   toolName: string;
@@ -29,7 +37,7 @@ export class PermissionBroker {
   ) {}
 
   async decide(sessionId: string, toolName: string, input: Record<string, unknown>, signal: AbortSignal): Promise<PermissionResult> {
-    if (this.host.isAllowedAlways(toolName, input) || this.sessionAllow.get(sessionId)?.has(toolName)) {
+    if (this.host.isAllowedAlways(toolName, input) || this.sessionAllow.get(sessionId)?.has(allowKey(toolName, input))) {
       return { behavior: 'allow', updatedInput: input };
     }
     const requestId = newMessageId();
@@ -57,7 +65,7 @@ export class PermissionBroker {
     if (decision === 'deny') return { behavior: 'deny', message: 'The user denied this action.' };
     if (decision === 'allow_session') {
       const set = this.sessionAllow.get(sessionId) ?? new Set<string>();
-      set.add(toolName);
+      set.add(allowKey(toolName, input));
       this.sessionAllow.set(sessionId, set);
     }
     return { behavior: 'allow', updatedInput: input };

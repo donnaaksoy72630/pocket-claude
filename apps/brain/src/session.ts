@@ -1,6 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
+import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import {
   createSdkMcpServer,
@@ -30,6 +29,7 @@ import { agentDefinitions, AUTO_ALLOWED_TOOLS, BUILTIN_TOOLS, CLAUDE_TOOLS, clau
 import type { ExecutorHandle } from './executor.js';
 import { log } from './log.js';
 import { PC_ALLOWED_TOOLS, pcTools, pcToolsPrompt, type PcHandle } from './pc-tools.js';
+import { ATTACHMENTS_DIR, chatFolder, DEFAULT_MAC_WORKSPACE, macSandbox, macWorkspaceFor, ownFolderPrompt, SANDBOX_PROMPT } from './sandbox.js';
 import { ensureSkillsPlugin, paths } from './store.js';
 
 export interface SessionHost {
@@ -68,8 +68,7 @@ export const VOICE_NOTE = [
   'After any action, say in one sentence what you did and what you saw.]',
 ].join(' ');
 
-/** Where chats work when no project is picked. */
-export const DEFAULT_MAC_WORKSPACE = process.env.POCKET_WORKSPACE ?? join(homedir(), 'Documents', 'pocket-workspace');
+export { DEFAULT_MAC_WORKSPACE };
 
 const INLINE_TEXT_LIMIT = 200_000;
 const isImage = (mime: string) => /^image\/(png|jpe?g|gif|webp)$/i.test(mime);
@@ -80,12 +79,14 @@ function safeFileName(name: string | undefined, fallback: string): string {
   return cleaned && cleaned !== '.' && cleaned !== '..' ? cleaned.slice(0, 120) : fallback;
 }
 
-function macSystemPrompt(cwd: string, projectInstructions: string | null, pcName: string | undefined): string {
+function macSystemPrompt(cwd: string, projectInstructions: string | null, pcName: string | undefined, place: { own: boolean; sandboxed: boolean }): string {
   return [
     '# Workspace',
     `You work on the user\'s Mac in ${cwd}. Use your normal tools there.`,
     'The user chats from a phone. Keep replies short and lead with the outcome; they can copy any reply or code block to their Windows laptop clipboard with one tap, so put things meant for pasting into a single code block.',
     'Files the user attaches (often straight from their Windows clipboard) are saved on this Mac; their paths are listed in the message. Read them from there.',
+    place.own ? ownFolderPrompt(cwd) : '',
+    place.sandboxed ? SANDBOX_PROMPT : '',
     pcToolsPrompt(pcName),
     chatToolsPrompt(),
     projectInstructions ? `# Project instructions (CLAUDE.md)\n${projectInstructions}` : '',
@@ -287,12 +288,14 @@ export class Session {
     this.setMeta({ hidden: hidden || undefined });
   }
 
-  /** Stops Claude Code and removes the chat's history from disk. */
+  /** Stops Claude Code and removes the chat's history from disk. Its own folder on the Mac stays, just in case. */
   destroy(): void {
     this.stop();
     this.destroyed = true;
     if (this.idleTimer) clearTimeout(this.idleTimer);
     rmSync(this.historyFile(), { force: true });
+    const folder = chatFolder(this.meta);
+    if (existsSync(folder)) log(`chat ${this.id} deleted; its files stay in ${folder}`);
   }
 
   rename(title: string): void {
@@ -359,7 +362,8 @@ export class Session {
   private saveFiles(files: { mime: string; dataBase64: string; name?: string }[], blocks: Exclude<SDKUserMessage['message']['content'], string>): string[] {
     if (!files.length) return [];
     const onMac = this.host.executorFor(this.id).id === undefined && !this.host.chatOnly(this.id);
-    const inbox = join(paths.home, 'inbox', this.id);
+    const place = onMac ? macWorkspaceFor(this.meta) : undefined;
+    const inbox = place?.own ? join(place.cwd, ATTACHMENTS_DIR) : join(paths.home, 'inbox', this.id);
     if (onMac) mkdirSync(inbox, { recursive: true, mode: 0o700 });
     const notes: string[] = [];
     files.forEach((f, i) => {
@@ -471,14 +475,19 @@ export class Session {
         systemPrompt: { type: 'preset', preset: 'claude_code', append: chatSystemPrompt(this.host.userName(this.id), pcName) },
       };
     } else if (executor.id === undefined) {
-      cwd = this.macWorkspace();
+      const place = macWorkspaceFor(this.meta);
+      cwd = place.cwd;
       mkdirSync(cwd, { recursive: true });
+      const sandbox = macSandbox();
       specific = {
         tools: { type: 'preset', preset: 'claude_code' },
         disallowedTools: MAC_DISALLOWED,
         allowedTools: MAC_AUTO_ALLOWED,
         mcpServers: { [MCP_SERVER_NAME]: this.pcServer() },
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: macSystemPrompt(cwd, readInstructions(cwd), pcName) },
+        ...(sandbox ? { sandbox } : {}),
+        // The chat's own folder is its sandbox: edits there go through; a picked project still asks.
+        ...(place.own ? { permissionMode: 'acceptEdits' as const } : {}),
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: macSystemPrompt(cwd, readInstructions(cwd), pcName, { own: place.own, sandboxed: !!sandbox }) },
       };
     } else {
       const roots = executor.root ? [executor.root] : (executor.info?.workspaces ?? []);
@@ -519,17 +528,6 @@ export class Session {
     this.started = true;
     this.q = query({ prompt: this.input, options });
     void this.pump(this.q);
-  }
-
-  /** The picked project if it still exists, else the default workspace. */
-  private macWorkspace(): string {
-    const project = this.meta.project;
-    if (project) {
-      try {
-        if (statSync(project).isDirectory()) return project;
-      } catch {}
-    }
-    return DEFAULT_MAC_WORKSPACE;
   }
 
   /** The pc_* and chat_* tools: what Mac and chat-only sessions get. */

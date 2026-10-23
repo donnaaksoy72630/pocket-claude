@@ -1,4 +1,4 @@
-import { mkdirSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { Options, Query, SDKMessage } from '@anthropic-ai/claude-agent-sdk';
 import type { SessionMeta } from '@pocket/protocol';
@@ -16,6 +16,7 @@ vi.mock('@anthropic-ai/claude-agent-sdk', async (importActual) => ({ ...(await i
 
 const { query } = await import('@anthropic-ai/claude-agent-sdk');
 const { Session } = await import('../src/session.js');
+const { chatFolder, DEFAULT_MAC_WORKSPACE } = await import('../src/sandbox.js');
 type Host = ConstructorParameters<typeof Session>[1];
 
 /** Stands in for the Claude Code process: the test pushes the messages it would stream. */
@@ -70,10 +71,12 @@ function host(over: Partial<Host> = {}): Host {
   };
 }
 
-function newSession(id = 'aaaaaaaa-1111-2222-3333-444444444444') {
+function newSession(id = 'aaaaaaaa-1111-2222-3333-444444444444', over: Partial<SessionMeta> = {}) {
   const now = Date.UTC(2026, 9, 23, 12);
-  return new Session({ sessionId: id, title: 'Test', state: 'idle', createdAt: now, updatedAt: now, userId: 'owner' }, host(), false);
+  return new Session({ sessionId: id, title: 'Test', state: 'idle', createdAt: now, updatedAt: now, userId: 'owner', ...over }, host(), false);
 }
+
+const appended = () => (fake.options.systemPrompt as { append?: string }).append ?? '';
 
 beforeEach(() => {
   metas.length = 0;
@@ -125,5 +128,56 @@ describe('Claude switching its own model', () => {
     expect(fake.options.model).toBe('fable');
     expect(first.setModel).not.toHaveBeenCalled();
     s.stop();
+  });
+});
+
+describe('a sandbox per Mac chat', () => {
+  it('gives a new chat its own folder, the Seatbelt sandbox and edits without asking', async () => {
+    const s = newSession('feedfacecafe');
+    await s.send({ text: 'hi', from: 'phone' });
+    const folder = chatFolder(s.meta);
+    expect(folder).toBe(`${dirs.workspace}/chats/2026-10-23-feedface`);
+    expect(fake.options.cwd).toBe(folder);
+    expect(existsSync(folder)).toBe(true);
+    expect(s.meta.engine?.cwd).toBe(folder);
+    expect(fake.options.permissionMode).toBe('acceptEdits');
+    expect(fake.options.sandbox).toMatchObject({ enabled: true, autoAllowBashIfSandboxed: true, failIfUnavailable: false });
+    expect(appended()).toMatch(/This chat's own folder/);
+    expect(appended()).toMatch(/# Sandbox/);
+    s.stop();
+  });
+
+  it('puts the notes from earlier back into the prompt and keeps attachments in the folder', async () => {
+    const s = newSession('notesnotes');
+    const folder = chatFolder(s.meta);
+    mkdirSync(folder, { recursive: true });
+    writeFileSync(join(folder, 'NOTES.md'), 'The user is building a slide deck in deck/.');
+    await s.send({ text: 'look', from: 'phone', attachments: [{ mime: 'text/plain', name: 'brief.txt', dataBase64: Buffer.from('brief').toString('base64') }] });
+    expect(appended()).toMatch(/## NOTES\.md\nThe user is building a slide deck/);
+    expect(readFileSync(join(folder, 'attachments', 'brief.txt'), 'utf8')).toBe('brief');
+    s.stop();
+  });
+
+  it('leaves chats that already live in the shared folder there, asking for edits as before', async () => {
+    const s = newSession('legacychat', { engine: { id: 'old-engine', cwd: DEFAULT_MAC_WORKSPACE } });
+    await s.send({ text: 'hi', from: 'phone' });
+    expect(fake.options.cwd).toBe(DEFAULT_MAC_WORKSPACE);
+    expect(fake.options.resume).toBe('old-engine');
+    expect(fake.options.permissionMode).toBe('default');
+    expect(appended()).not.toMatch(/own folder/);
+    s.stop();
+  });
+
+  it('runs without the sandbox when POCKET_SANDBOX=off', async () => {
+    process.env.POCKET_SANDBOX = 'off';
+    try {
+      const s = newSession('nosandbox');
+      await s.send({ text: 'hi', from: 'phone' });
+      expect(fake.options.sandbox).toBeUndefined();
+      expect(appended()).not.toMatch(/# Sandbox/);
+      s.stop();
+    } finally {
+      delete process.env.POCKET_SANDBOX;
+    }
   });
 });

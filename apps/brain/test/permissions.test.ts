@@ -93,4 +93,17 @@ describe('PermissionBroker', () => {
     expect(await b).toMatchObject({ behavior: 'deny' });
     expect(broker.outstanding()).toHaveLength(0);
   });
+
+  it('remembers network access for the chat per host, not for the whole network', async () => {
+    const { host, requests } = makeHost();
+    const broker = new PermissionBroker(host);
+    const first = broker.decide('s1', 'SandboxNetworkAccess', { host: 'example.com' }, signal());
+    broker.respond(requests[0]!.requestId, 'allow_session', 'phone');
+    await first;
+    expect(await broker.decide('s1', 'SandboxNetworkAccess', { host: 'EXAMPLE.com' }, signal())).toMatchObject({ behavior: 'allow' });
+    expect(requests).toHaveLength(1);
+    void broker.decide('s1', 'SandboxNetworkAccess', { host: 'other.example' }, signal());
+    expect(requests).toHaveLength(2);
+    broker.denyAll();
+  });
 });

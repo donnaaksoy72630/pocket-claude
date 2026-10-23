@@ -21,6 +21,7 @@ const { DeviceLink, joinAccount } = await import('../../packages/transport/src/i
 const { startNodeRelay } = await import('../../apps/relay/src/node-server.js');
 const { Brain } = await import('../../apps/brain/src/daemon.js');
 const { ensureDirs } = await import('../../apps/brain/src/store.js');
+const { chatFolder } = await import('../../apps/brain/src/sandbox.js');
 const { logToStderr } = await import('../../apps/brain/src/log.js');
 const { ToolDispatcher } = await import('../../apps/executor-extension/src/dispatch.js');
 const { createPathGuard } = await import('../../apps/executor-extension/src/path-guard.js');
@@ -258,13 +259,16 @@ try {
   check(/inner\.txt/.test(text) && !/second\.txt/.test(text), 'the chat works inside the picked project folder');
   exec2Link.close();
 
-  step('a new chat works on the Mac by default');
-  writeFileSync(join(macWorkspace, 'mac-note.txt'), 'the answer is 42\n');
-  const macCreated = until<string>('mac session', (ok) =>
-    clientLink.on('message', ({ message }) => message.type === 'session.created' && message.payload.session.sessionId !== sessionId && ok(message.payload.session.sessionId)),
+  step('a new chat works on the Mac by default, in its own folder');
+  const macCreated = until<{ sessionId: string; createdAt: number }>('mac session', (ok) =>
+    clientLink.on('message', ({ message }) => message.type === 'session.created' && message.payload.session.sessionId !== sessionId && ok(message.payload.session)),
   );
   clientLink.send(brainId, { type: 'session.create', payload: { title: 'mac' } });
-  const macSession = await macCreated;
+  const macMeta = await macCreated;
+  const macSession = macMeta.sessionId;
+  const macFolder = chatFolder(macMeta);
+  mkdirSync(macFolder, { recursive: true });
+  writeFileSync(join(macFolder, 'mac-note.txt'), 'the answer is 42\n');
   const execCallsBefore = toolCalls.length + calls2.length;
   await ask('Read mac-note.txt in the current directory and reply with just the number in it.', macSession);
   check(/42/.test(text), 'Claude read a file in the Mac workspace');
@@ -274,7 +278,7 @@ try {
     { mime: 'text/plain', name: 'from-pc.txt', dataBase64: Buffer.from('purple elephant').toString('base64') },
   ]);
   check(/purple elephant/i.test(text), 'Claude read a file attached from the phone');
-  check(existsSync(join(home, 'inbox', macSession, 'from-pc.txt')), 'attachment saved in the chat inbox on the Mac');
+  check(existsSync(join(macFolder, 'attachments', 'from-pc.txt')), "attachment saved in the chat's folder on the Mac");
 
   step('clipboard: a computer that only shares its clipboard');
   const { ClipboardAgent } = await import('../../apps/clipboard-agent/src/agent.js');

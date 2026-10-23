@@ -1,0 +1,127 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
+import type { Options } from '@anthropic-ai/claude-agent-sdk';
+import type { SessionMeta } from '@pocket/protocol';
+
+/** Where Mac chats keep their files; each chat gets its own folder under `chats/`. */
+export const DEFAULT_MAC_WORKSPACE = process.env.POCKET_WORKSPACE ?? join(homedir(), 'Documents', 'pocket-workspace');
+
+/** The chat's memory, kept by Claude in its folder and put back into the prompt at every start. */
+export const NOTES_FILE = 'NOTES.md';
+export const ATTACHMENTS_DIR = 'attachments';
+const NOTES_LIMIT = 20_000;
+const LISTED_FILES = 60;
+
+/**
+ * Hosts sandboxed shell commands reach without asking: code hosting and package registries. Anything else is
+ * asked on the phone (`SandboxNetworkAccess`). `POCKET_SANDBOX_DOMAINS` adds more.
+ */
+export const SANDBOX_DOMAINS = [
+  'github.com',
+  '*.github.com',
+  '*.githubusercontent.com',
+  'registry.npmjs.org',
+  'registry.yarnpkg.com',
+  'pypi.org',
+  'files.pythonhosted.org',
+  'crates.io',
+  '*.crates.io',
+  'proxy.golang.org',
+  'sum.golang.org',
+  'formulae.brew.sh',
+  'ghcr.io',
+];
+
+/** A chat's own folder: named by the day it was made and its id, so it never moves when the chat is renamed. */
+export function chatFolder(meta: Pick<SessionMeta, 'sessionId' | 'createdAt'>): string {
+  return join(DEFAULT_MAC_WORKSPACE, 'chats', `${new Date(meta.createdAt).toISOString().slice(0, 10)}-${meta.sessionId.slice(0, 8)}`);
+}
+
+const isDir = (p: string) => {
+  try {
+    return statSync(p).isDirectory();
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Where a Mac chat works: the picked project if it still exists; the shared folder for chats whose Claude Code session
+ * already lives there (moving them would lose the conversation); otherwise the chat's own folder.
+ */
+export function macWorkspaceFor(meta: SessionMeta): { cwd: string; own: boolean } {
+  if (meta.project && isDir(meta.project)) return { cwd: meta.project, own: false };
+  if (meta.engine?.cwd === DEFAULT_MAC_WORKSPACE) return { cwd: DEFAULT_MAC_WORKSPACE, own: false };
+  return { cwd: chatFolder(meta), own: true };
+}
+
+/** Seatbelt sandbox for the shell commands of Mac chats; `POCKET_SANDBOX=off` turns it off. */
+export function macSandbox(env: NodeJS.ProcessEnv = process.env): Options['sandbox'] | undefined {
+  if (/^(off|0|false|no)$/i.test(env.POCKET_SANDBOX ?? '')) return undefined;
+  const extra = (env.POCKET_SANDBOX_DOMAINS ?? '').split(/[\s,]+/).filter(Boolean);
+  return {
+    enabled: true,
+    // Without Seatbelt (not macOS, broken install) commands run as before, with a permission prompt each.
+    failIfUnavailable: false,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: true,
+    network: { allowedDomains: [...SANDBOX_DOMAINS, ...extra], allowLocalBinding: true },
+  };
+}
+
+export const SANDBOX_PROMPT = [
+  '# Sandbox',
+  'Shell commands run in a macOS sandbox and need no approval: they may write only inside your working directory and temp folders, and reach the network through a proxy where code hosts and package registries are open; any other host is asked on the user\'s phone.',
+  'If a command really has to go outside (install something system-wide, change files elsewhere), rerun it with dangerouslyDisableSandbox: the user is asked first, so say why in one sentence.',
+].join('\n');
+
+function readNotes(dir: string): string | null {
+  try {
+    const text = readFileSync(join(dir, NOTES_FILE), 'utf8').trim();
+    if (!text) return null;
+    return text.length > NOTES_LIMIT ? `${text.slice(0, NOTES_LIMIT)}\n…[cut: the file is longer; read it for the rest]` : text;
+  } catch {
+    return null;
+  }
+}
+
+/** Files of the folder, two levels deep, folders marked with a slash; dot files and dependency folders skipped. */
+export function listFolder(dir: string, max = LISTED_FILES): string[] {
+  const out: string[] = [];
+  const walk = (rel: string, depth: number) => {
+    let entries;
+    try {
+      entries = readdirSync(join(dir, rel), { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      if (out.length >= max) return;
+      if (e.name.startsWith('.') || e.name === 'node_modules' || e.name === '__pycache__') continue;
+      const path = rel ? `${rel}/${e.name}` : e.name;
+      if (e.isDirectory()) {
+        out.push(`${path}/`);
+        if (depth < 1) walk(path, depth + 1);
+      } else out.push(path);
+    }
+  };
+  walk('', 0);
+  return out;
+}
+
+/** What Claude is told about a chat's own folder: what it is for, what is in it, and its notes from earlier. */
+export function ownFolderPrompt(dir: string): string {
+  const files = listFolder(dir);
+  const notes = readNotes(dir);
+  return [
+    "# This chat's own folder",
+    `This chat has its own folder on the Mac, ${dir}; it is your working directory. Keep everything you make for this chat here: it stays between messages and restarts, and is kept even after the chat is deleted. Edits inside it need no approval.`,
+    `Keep ${NOTES_FILE} in it as the chat's memory: what the user wants, decisions made, what each file is for, what is left. Update it, briefly, whenever something worth remembering changes; you get it back here every time this chat starts.`,
+    `Files the user attaches are saved in ${ATTACHMENTS_DIR}/.`,
+    files.length ? `Files here now:\n${files.map((f) => `- ${f}`).join('\n')}${files.length >= LISTED_FILES ? '\n- …' : ''}` : 'The folder is empty so far.',
+    notes ? `## ${NOTES_FILE}\n${notes}` : '',
+  ]
+    .filter(Boolean)
+    .join('\n\n');
+}
