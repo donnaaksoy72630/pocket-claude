@@ -1,7 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useEffect, useMemo, useState } from 'react';
-import { Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
+import { Linking, Platform, Pressable, Share, StyleSheet, Text, View } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { PHASE_LABEL, useCall, useElapsed } from '../../src/call';
 import { useCallPrefs } from '../../src/call-prefs';
@@ -24,6 +24,7 @@ export default function CallScreen() {
   const prefs = useCallPrefs();
   const persona = useMemo(() => personaFor(sessionId), [sessionId]);
   const brainOnline = useChatSelector((s) => s.brainOnline);
+  const connection = useChatSelector((s) => s.connection);
   const appActive = useAppActive();
   const [speaker, setSpeaker] = useState(prefs.speaker);
   const { start } = call;
@@ -67,7 +68,9 @@ export default function CallScreen() {
     if (log) void Share.share({ message: log }).catch(() => {});
   };
 
-  const status = snap?.error ?? (!brainOnline && phase !== 'error' ? 'Mac offline' : PHASE_LABEL[phase]);
+  // The phone's own connection first: without it the Mac looks offline too.
+  const offline = phase === 'error' ? null : connection !== 'online' ? 'No connection, reconnecting…' : !brainOnline ? 'Mac offline' : null;
+  const status = snap?.error ?? offline ?? PHASE_LABEL[phase];
   const line = speaking ? snap?.said : snap?.heard;
   const placeholder = phase === 'listening' ? 'Say something; a short pause sends it.' : phase === 'thinking' ? 'Claude is on it…' : ' ';
   const badges = [snap?.callKit ? 'Phone call' : null, snap?.echoCancellation ? 'Talk over it' : null, snap?.voiceName ? `Voice: ${snap.voiceName}` : null].filter(Boolean);
@@ -81,6 +84,11 @@ export default function CallScreen() {
         <Pressable onLongPress={shareLog} delayLongPress={600} hitSlop={8} accessibilityHint="Long press to send the call log">
           <Text style={[styles.status, phase === 'error' && { color: colors.danger }, phase === 'listening' && { color: colors.ok }]}>{status}</Text>
         </Pressable>
+        {phase === 'error' && snap?.errorAction === 'settings' ? (
+          <Pressable onPress={() => void Linking.openSettings()} style={styles.action} accessibilityRole="button">
+            <Text style={styles.actionText}>Open Settings</Text>
+          </Pressable>
+        ) : null}
         {badges.length ? <Text style={styles.badges}>{badges.join(' · ')}</Text> : null}
       </View>
 
@@ -123,6 +131,8 @@ const styles = StyleSheet.create({
   timer: { color: colors.textMuted, fontSize: 15, fontVariant: ['tabular-nums'] },
   status: { color: colors.textMuted, fontSize: 15, marginTop: 4, textAlign: 'center' },
   badges: { color: colors.textMuted, fontSize: 12, textAlign: 'center' },
+  action: { marginTop: 4, paddingHorizontal: 18, paddingVertical: 10, borderRadius: 20, backgroundColor: colors.surface },
+  actionText: { color: colors.accent, fontSize: 15, fontWeight: '600' },
   transcript: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingVertical: 24 },
   line: { color: colors.text, fontSize: 18, lineHeight: 26, textAlign: 'center' },
   hint: { color: colors.textMuted, fontSize: 13, marginTop: 12, textAlign: 'center' },

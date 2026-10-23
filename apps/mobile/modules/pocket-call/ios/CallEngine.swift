@@ -1290,7 +1290,11 @@ extension CallEngine: AVSpeechSynthesizerDelegate {
 extension CallEngine: SFSpeechRecognizerDelegate {
   func speechRecognizer(_ speechRecognizer: SFSpeechRecognizer, availabilityDidChange available: Bool) {
     queue.async { [weak self] in
-      self?.note("speech recognition \(available ? "available" : "unavailable")")
+      guard let self, self.running else { return }
+      self.note("speech recognition \(available ? "available" : "unavailable")")
+      if !available {
+        self.emit(["type": "recognitionError", "code": "unavailable", "message": "Speech recognition is unavailable right now."])
+      }
     }
   }
 }

@@ -159,5 +159,20 @@ describe('createSpeechEngine', () => {
     }));
     const { createSpeechEngine: create } = await import('../src/speech-engine');
     await expect(create().start(OPTIONS)).rejects.toThrow('Microphone access is off');
+    await expect(create().start(OPTIONS)).rejects.toMatchObject({ code: 'permission' });
+  });
+
+  it('says in words why the native engine did not start', async () => {
+    vi.resetModules();
+    const native = {
+      requestPermissions: vi.fn(async () => ({ speech: true, microphone: true })),
+      start: vi.fn(async () => {
+        throw Object.assign(new Error('Speech recognition does not support ru-RU on this iPhone.'), { code: 'ERR_CALL_LANGUAGE' });
+      }),
+      addListener: vi.fn(() => ({ remove: () => {} })),
+    };
+    vi.doMock('../modules/pocket-call', () => ({ PocketCall: native }));
+    const { createSpeechEngine: create } = await import('../src/speech-engine');
+    await expect(create().start(OPTIONS)).rejects.toMatchObject({ code: 'language', message: expect.stringContaining('Pick another language') });
   });
 });

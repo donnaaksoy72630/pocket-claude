@@ -4,6 +4,7 @@ import {
   callLanguage,
   completeSentences,
   endpointDelay,
+  EngineError,
   holdWords,
   isBargeIn,
   isStopRequest,
@@ -410,6 +411,26 @@ describe('VoiceCall', () => {
     expect(engine.stopped).toBe(0);
     engine.finishSpeaking();
     expect(engine.mode).toBe('listen');
+  });
+
+  it('offers the phone settings when a permission is off', async () => {
+    const { engine, call } = setup();
+    engine.start = async () => {
+      throw new EngineError('permission', 'Microphone access is off');
+    };
+    await call.start();
+    expect(call.snapshot()).toMatchObject({ phase: 'error', error: 'Microphone access is off', errorAction: 'settings' });
+  });
+
+  it('shows recognition trouble until the user is heard again', async () => {
+    const { engine, call } = setup();
+    await call.start();
+    engine.emit({ type: 'recognitionError', code: 'kAFAssistantErrorDomain:1101', message: 'x' });
+    expect(call.snapshot().notice).toBeUndefined();
+    engine.emit({ type: 'recognitionError', code: 'unavailable', message: 'x' });
+    expect(call.snapshot().notice).toMatch(/unavailable right now/);
+    engine.emit({ type: 'final', text: 'привет' });
+    expect(call.snapshot().notice).toBeUndefined();
   });
 
   it('shows why a call could not start', async () => {

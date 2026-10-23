@@ -315,6 +315,17 @@ export interface EngineInfo {
   voiceQuality: VoiceQuality | null;
 }
 
+/** Why an engine could not start. A `permission` one is fixed in the phone's settings. */
+export class EngineError extends Error {
+  constructor(
+    readonly code: 'permission' | 'language' | 'audio',
+    message: string,
+  ) {
+    super(message);
+    this.name = 'EngineError';
+  }
+}
+
 export interface SpeechEngine {
   start(options: EngineStartOptions): Promise<EngineInfo>;
   end(): void;
@@ -341,6 +352,8 @@ export interface CallSnapshot {
   said: string;
   userSpeaking: boolean;
   error?: string;
+  /** The error is fixed in the phone's settings (a permission is off): the call screen offers to open them. */
+  errorAction?: 'settings';
   /** Something worth knowing that does not stop the call. */
   notice?: string;
   echoCancellation: boolean;
@@ -397,6 +410,8 @@ export class VoiceCall {
   private mode: CaptureMode = 'off';
   private thinkingSound = false;
   private thinkingTimer: ReturnType<typeof setTimeout> | null = null;
+  /** A notice about something that passes (recognition trouble, the background): cleared once the user is heard. */
+  private passingNotice: string | null = null;
 
   // The chat
   private items: readonly ChatItem[];
@@ -476,7 +491,7 @@ export class VoiceCall {
       this.sync();
     } catch (e) {
       if (this.ended) return;
-      this.fail(e instanceof Error ? e.message : String(e));
+      this.fail(e instanceof Error ? e.message : String(e), e instanceof EngineError && e.code === 'permission' ? 'settings' : undefined);
     }
   }
 
@@ -594,16 +609,19 @@ export class VoiceCall {
       case 'route':
         this.snap = { ...this.snap, route: e.output };
         break;
-      case 'recognitionError':
+      case 'recognitionError': {
         this.note(`recognition error ${e.code}: ${e.message}`);
+        const notice = recognitionNotice(e.code, this.deps.language);
+        if (notice) this.notice(notice);
         break;
+      }
       case 'error':
         this.note(`error ${e.code}: ${e.message}`);
         if (e.fatal) {
           this.fail(e.message);
           return;
         }
-        this.snap = { ...this.snap, notice: e.message };
+        this.notice(e.message);
         break;
       case 'log':
         this.note(e.message);
@@ -641,6 +659,8 @@ export class VoiceCall {
     }
     this.note(`heard: ${text}`);
     this.snap = { ...this.snap, heard: text };
+    if (this.passingNotice !== null && this.snap.notice === this.passingNotice) this.snap = { ...this.snap, notice: undefined };
+    this.passingNotice = null;
     if (this.confirming) {
       this.answerPermission(text);
       return;
@@ -821,11 +841,16 @@ export class VoiceCall {
     }
   }
 
-  private fail(message: string): void {
+  private fail(message: string, action?: 'settings'): void {
     this.note(`failed: ${message}`);
     this.failed = true;
-    this.snap = { ...this.snap, error: message };
+    this.snap = { ...this.snap, error: message, ...(action ? { errorAction: action } : {}) };
     this.end();
+  }
+
+  private notice(text: string): void {
+    this.passingNotice = text;
+    this.snap = { ...this.snap, notice: text };
   }
 
   private emit(next: CallSnapshot): void {
@@ -848,6 +873,7 @@ const SNAPSHOT_KEYS: (keyof CallSnapshot)[] = [
   'said',
   'userSpeaking',
   'error',
+  'errorAction',
   'notice',
   'echoCancellation',
   'callKit',
@@ -856,6 +882,13 @@ const SNAPSHOT_KEYS: (keyof CallSnapshot)[] = [
   'route',
   'endedRemotely',
 ];
+
+/** Recognition trouble the user can do something about, in words; null for what only goes to the log. */
+function recognitionNotice(code: string, language: string): string | null {
+  if (code === 'unavailable' || code === 'network') return 'Speech recognition is unavailable right now: check the internet connection.';
+  if (code === 'language-not-supported') return `Speech recognition does not support ${language} on this phone. Pick another language in Pocket settings.`;
+  return null;
+}
 
 function voiceHint(lang: CallLang): string {
   return lang === 'ru'

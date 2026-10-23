@@ -40,7 +40,9 @@ public final class PocketCallModule: Module {
         case .success(let info):
           promise.resolve(info)
         case .failure(let error):
-          promise.reject("ERR_CALL_START", error.localizedDescription)
+          // ERR_CALL_LANGUAGE, ERR_CALL_MICROPHONE…: src/speech-engine.ts puts them in words.
+          let code = (error as? CallError).map { "ERR_CALL_\($0.code.uppercased())" } ?? "ERR_CALL_START"
+          promise.reject(code, error.localizedDescription)
         }
       }
     }
