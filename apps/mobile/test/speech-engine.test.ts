@@ -122,6 +122,26 @@ describe('createSpeechEngine', () => {
     expect(native.start).toHaveBeenCalledWith(expect.objectContaining({ language: 'ru-RU', rate: 0.52, useCallKit: true }));
   });
 
+  it('does not start the native call when it was hung up during the permission prompt', async () => {
+    vi.resetModules();
+    let allow: (value: { speech: boolean; microphone: boolean }) => void = () => {};
+    const native = {
+      requestPermissions: vi.fn(() => new Promise<{ speech: boolean; microphone: boolean }>((resolve) => (allow = resolve))),
+      start: vi.fn(),
+      end: vi.fn(),
+      addListener: vi.fn(() => ({ remove: () => {} })),
+    };
+    vi.doMock('../modules/pocket-call', () => ({ PocketCall: native }));
+    const { createSpeechEngine: create } = await import('../src/speech-engine');
+    const engine = create();
+    const starting = engine.start(OPTIONS);
+    engine.end();
+    allow({ speech: true, microphone: true });
+    await expect(starting).rejects.toThrow('ended');
+    expect(native.start).not.toHaveBeenCalled();
+    expect(native.end).toHaveBeenCalledTimes(1);
+  });
+
   it('explains how to allow the microphone when it is off', async () => {
     vi.resetModules();
     vi.doMock('../modules/pocket-call', () => ({

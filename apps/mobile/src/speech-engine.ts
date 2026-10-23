@@ -8,12 +8,16 @@ type Listener = (event: EngineEvent) => void;
 
 /** The iOS engine (modules/pocket-call): CallKit, echo cancellation, recognition only while someone talks. */
 class NativeSpeechEngine implements SpeechEngine {
+  private ended = false;
+
   constructor(private readonly native: PocketCallModule) {}
 
   async start(options: EngineStartOptions): Promise<EngineInfo> {
     const allowed = await this.native.requestPermissions();
     if (!allowed.microphone) throw new Error('Microphone access is off: iPhone Settings → Pocket → Microphone.');
     if (!allowed.speech) throw new Error('Speech recognition is off: iPhone Settings → Pocket → Speech Recognition.');
+    // Hung up during the permission prompt: starting now would leave the microphone on with nobody listening.
+    if (this.ended) throw new Error('The call has ended.');
     const info = await this.native.start({
       language: options.language,
       voice: options.voice,
@@ -31,6 +35,7 @@ class NativeSpeechEngine implements SpeechEngine {
   }
 
   end(): void {
+    this.ended = true;
     this.native.end();
   }
 
