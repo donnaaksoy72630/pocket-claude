@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { PocketCall, type PowerState } from '../modules/pocket-call';
+import { useCallOn } from './call';
 
 function read(): PowerState | null {
   try {
@@ -18,4 +19,11 @@ export function usePowerSaving(): boolean {
     return () => sub.remove();
   }, []);
   return state !== null && (state.lowPower || state.thermalState === 'serious' || state.thermalState === 'critical');
+}
+
+/** Videos stay posters: the phone is hot, in Low Power Mode, or on a call (nothing should load or play meanwhile). */
+export function useQuietMedia(): boolean {
+  const saving = usePowerSaving();
+  const onCall = useCallOn();
+  return saving || onCall;
 }

@@ -916,8 +916,9 @@ final class CallEngine: NSObject {
     }
     let quiet = now - max(current.changedAt, lastVoiceAt)
     if tooLong || (!userSpeaking && quiet >= endpointDelay(current.heard)) {
-      current.request.endAudio()
-      current.finishingSince = now
+      // The transcript has not changed for the whole pause: hand it over now rather than wait up to 0.6 s for the
+      // final result, which by then only polishes punctuation.
+      commit()
     }
   }
 

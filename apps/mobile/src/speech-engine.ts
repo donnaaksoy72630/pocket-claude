@@ -110,6 +110,11 @@ export class JsSpeechEngine implements SpeechEngine {
   /** Sessions that ended right after starting in a row; restarting them at once spins the CPU. */
   private quickEnds = 0;
   private startedAt = 0;
+  /**
+   * Sessions we aborted whose `end` has not arrived yet. Every abort brings exactly one `end` of its own, on Android
+   * before the next session's `start`, on iOS possibly after it: counting them works in either order.
+   */
+  private abortedEnds = 0;
   private restartTimer: ReturnType<typeof setTimeout> | null = null;
   private lastError: string | null = null;
   private queue: { id: string; text: string }[] = [];
@@ -127,6 +132,12 @@ export class JsSpeechEngine implements SpeechEngine {
         if (this.quickEnds === 0) this.emit({ type: 'recognitionError', code: e.error, message: e.message || e.error });
       }),
       ExpoSpeechRecognitionModule.addListener('end', () => {
+        // The end of a session we aborted may arrive after the next one started: whoever aborted it decides what
+        // comes next, and it must not stop the new session or count as the recognizer giving up.
+        if (this.abortedEnds > 0) {
+          this.abortedEnds--;
+          return;
+        }
         // The platform ends sessions on its own (iOS after about a minute): keep listening. A session that ends
         // right away means the recognizer cannot run; back off instead of restarting in a tight loop.
         this.recognizing = false;
@@ -257,9 +268,12 @@ export class JsSpeechEngine implements SpeechEngine {
     this.timer = null;
     if (!this.recognizing) return;
     this.recognizing = false;
+    this.abortedEnds++;
     try {
       ExpoSpeechRecognitionModule.abort();
-    } catch {}
+    } catch {
+      this.abortedEnds--;
+    }
   }
 
   private onResult(e: ExpoSpeechRecognitionResultEvent): void {

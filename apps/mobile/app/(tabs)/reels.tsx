@@ -5,7 +5,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ReelItem } from '../../src/components/ReelItem';
 import { makeReel, type Reel } from '../../src/content/fake';
 import { useScreenActive } from '../../src/hooks';
-import { usePowerSaving } from '../../src/power';
+import { useQuietMedia } from '../../src/power';
 import { colors } from '../../src/theme';
 
 const PAGE = 6;
@@ -14,7 +14,7 @@ const VIEWABILITY = { itemVisiblePercentThreshold: 80 } as const;
 export default function ReelsScreen() {
   const insets = useSafeAreaInsets();
   const screenActive = useScreenActive();
-  const powerSaving = usePowerSaving();
+  const quiet = useQuietMedia();
   const [height, setHeight] = useState(0);
   const [reels, setReels] = useState<Reel[]>(() => Array.from({ length: PAGE }, (_, i) => makeReel(i)));
   const [current, setCurrent] = useState<string | null>(null);
@@ -26,8 +26,8 @@ export default function ReelsScreen() {
 
   const loadMore = useCallback(() => setReels((r) => [...r, ...Array.from({ length: PAGE }, (_, i) => makeReel(r.length + i))]), []);
   const onLayout = useCallback((e: LayoutChangeEvent) => setHeight(Math.round(e.nativeEvent.layout.height)), []);
-  // Hot phone or Low Power Mode: posters instead of video.
-  const activeId = screenActive && !powerSaving ? (current ?? reels[0]?.id ?? null) : null;
+  // Hot phone, Low Power Mode or a call: posters instead of video.
+  const activeId = screenActive && !quiet ? (current ?? reels[0]?.id ?? null) : null;
 
   return (
     <View style={styles.root} onLayout={onLayout}>
