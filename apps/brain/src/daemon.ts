@@ -38,6 +38,8 @@ import { DeviceLink, type IncomingMessage, type WebSocketCtor } from '@pocket/tr
 import { WebSocket as NodeWebSocket } from 'ws';
 import { isAllowedByRules, validateRule } from './allowlist.js';
 import { FALLBACK_MODELS } from './chat-tools.js';
+import { withOrca } from './orca.js';
+import { personRoot } from './sandbox.js';
 import { COMPUTER_TOOL, computerConsent } from './computer-tools.js';
 import { toDisplayCall } from './claude-tools.js';
 import { ExecutorBridge } from './executor.js';
@@ -349,11 +351,12 @@ export class Brain {
     return !!this.executor.info(deviceId)?.capabilities?.includes('overlay');
   }
 
-  /** Chats of people other than the owner that have no tools computer run on the Mac without any file access. */
-  private chatOnly(sessionId: string): boolean {
+  /** Chats of people other than the owner that have no tools computer work on the Mac inside that person's own folder. */
+  private guestRoot(sessionId: string): string | undefined {
     const s = this.sessions.get(sessionId);
-    if (!s) return false;
-    return !this.isOwner(s.meta.userId ?? OWNER_ID) && this.executorForSession(sessionId) === undefined;
+    if (!s) return undefined;
+    const userId = s.meta.userId ?? OWNER_ID;
+    return !this.isOwner(userId) && this.executorForSession(sessionId) === undefined ? personRoot(userId) : undefined;
   }
 
   /** The PocketClipboard computer a chat's pc_* tools talk to: the chat's computer if it has one, else the person's default. */
@@ -372,7 +375,7 @@ export class Brain {
     if (!this.sessions.has(sessionId)) return undefined;
     const executorId = this.executorForSession(sessionId);
     const pcId = this.pcForSession(sessionId);
-    return { mode: executorId ? 'remote' : this.chatOnly(sessionId) ? 'chat' : 'mac', ...(executorId ? { executorId } : {}), ...(pcId ? { pcId } : {}) };
+    return { mode: executorId ? 'remote' : 'mac', ...(executorId ? { executorId } : {}), ...(pcId ? { pcId } : {}) };
   }
 
   /** Sends a clipboard or screen request to a computer and waits for its answer. */
@@ -710,8 +713,8 @@ export class Brain {
       case 'computer.select': {
         const { deviceId, sessionId, project } = message.payload;
         if (deviceId === MAC_DEVICE_ID) {
-          if (!owner) return this.sendError(from, 'not_owner', "Only the Mac's owner can work on the Mac itself");
-          if (sessionId) mySession(sessionId)?.setExecutor(undefined, project);
+          // Invited people work on the Mac too, but only inside their own folder; a project elsewhere is ignored.
+          if (sessionId) mySession(sessionId)?.setExecutor(undefined, owner ? project : undefined);
         } else {
           if (!myComputer(deviceId)) return this.sendError(from, 'unknown_computer', 'That computer is not paired');
           if (sessionId && this.hasTools(deviceId)) mySession(sessionId)?.setExecutor(deviceId, project);
@@ -811,7 +814,7 @@ export class Brain {
         log(`supportedModels failed: ${String(e)}`);
       }
     }
-    return this.models ?? FALLBACK_MODELS;
+    return withOrca(this.models ?? FALLBACK_MODELS);
   }
 
   private activity(userId: string): PayloadOf<'activity.result'> {
@@ -882,7 +885,7 @@ export class Brain {
           },
         ),
       pcFor: (sessionId: string) => this.pcHandle(sessionId),
-      chatOnly: (sessionId: string) => this.chatOnly(sessionId),
+      guestRoot: (sessionId: string) => this.guestRoot(sessionId),
       ownerChat: (sessionId: string) => this.isOwner(this.userOfSession(sessionId)),
       userName: (sessionId: string) => this.userName(this.userOfSession(sessionId)),
       emit: (sessionId: string, event: SessionEvent, durable: boolean) => this.emitEvent(sessionId, event, durable),

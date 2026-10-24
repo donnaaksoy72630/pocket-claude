@@ -1,6 +1,6 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { readdirSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { basename, dirname, join, resolve, sep } from 'node:path';
 import type { Options } from '@anthropic-ai/claude-agent-sdk';
 import type { SessionMeta } from '@pocket/protocol';
 
@@ -34,8 +34,33 @@ export const SANDBOX_DOMAINS = [
 ];
 
 /** A chat's own folder: named by the day it was made and its id, so it never moves when the chat is renamed. */
-export function chatFolder(meta: Pick<SessionMeta, 'sessionId' | 'createdAt'>): string {
-  return join(DEFAULT_MAC_WORKSPACE, 'chats', `${new Date(meta.createdAt).toISOString().slice(0, 10)}-${meta.sessionId.slice(0, 8)}`);
+export function chatFolder(meta: Pick<SessionMeta, 'sessionId' | 'createdAt' | 'userId'>): string {
+  const base = isGuest(meta.userId) ? personRoot(meta.userId!) : DEFAULT_MAC_WORKSPACE;
+  return join(base, 'chats', `${new Date(meta.createdAt).toISOString().slice(0, 10)}-${meta.sessionId.slice(0, 8)}`);
+}
+
+const OWNER = 'owner';
+const isGuest = (userId: string | undefined) => !!userId && userId !== OWNER;
+
+/** Everything an invited person has on the Mac: their chats' folders live under it and nothing of theirs outside. */
+export function personRoot(userId: string): string {
+  return join(DEFAULT_MAC_WORKSPACE, 'people', userId.replace(/[^\w-]/g, '_'));
+}
+
+/** True when `path` (resolved from `cwd`, symlinks followed where they exist) is `root` or inside it. */
+export function insideRoot(path: string, cwd: string, root: string): boolean {
+  const real = (p: string): string => {
+    try {
+      return realpathSync(p);
+    } catch {
+      // A file that does not exist yet: check the folder it would go in.
+      const parent = dirname(p);
+      return parent === p ? p : join(real(parent), basename(p));
+    }
+  };
+  const target = real(resolve(cwd, path));
+  const top = real(root);
+  return target === top || target.startsWith(top + sep);
 }
 
 const isDir = (p: string) => {
@@ -51,6 +76,12 @@ const isDir = (p: string) => {
  * already lives there (moving them would lose the conversation); otherwise the chat's own folder.
  */
 export function macWorkspaceFor(meta: SessionMeta): { cwd: string; own: boolean } {
+  if (isGuest(meta.userId)) {
+    // An invited person works only inside their own part of the workspace, never in the owner's folders.
+    const root = personRoot(meta.userId!);
+    if (meta.project && isDir(meta.project) && insideRoot(meta.project, root, root)) return { cwd: meta.project, own: false };
+    return { cwd: chatFolder(meta), own: true };
+  }
   if (meta.project && isDir(meta.project)) return { cwd: meta.project, own: false };
   if (meta.engine?.cwd === DEFAULT_MAC_WORKSPACE) return { cwd: DEFAULT_MAC_WORKSPACE, own: false };
   return { cwd: chatFolder(meta), own: true };
@@ -72,6 +103,33 @@ export function macSandbox(env: NodeJS.ProcessEnv = process.env, opts: { autoAll
     network: { allowedDomains: [...SANDBOX_DOMAINS, ...extra], allowLocalBinding: true },
   };
 }
+
+/**
+ * The sandbox of an invited person's Mac chat: shell commands never leave it (no unsandboxed retry) and cannot read the
+ * owner's documents, projects, keys or Claude settings; the person's own folder stays readable.
+ */
+export function guestSandbox(root: string, env: NodeJS.ProcessEnv = process.env): Options['sandbox'] {
+  const home = homedir();
+  const base = macSandbox(env) ?? { enabled: true, network: { allowedDomains: [...SANDBOX_DOMAINS], allowLocalBinding: true } };
+  return {
+    ...base,
+    enabled: true,
+    autoAllowBashIfSandboxed: true,
+    allowUnsandboxedCommands: false,
+    filesystem: {
+      denyRead: GUEST_HIDDEN.map((p) => join(home, p)),
+      allowRead: [root],
+    },
+  };
+}
+
+/** Parts of the owner's home an invited person's commands may not read. */
+const GUEST_HIDDEN = ['Documents', 'Desktop', 'Downloads', 'Pictures', 'Movies', 'Music', '.pocket-claude', '.claude', '.ssh', '.gnupg', '.config', '.aws', '.netrc', '.gitconfig', '.zsh_history', '.bash_history', 'Library/Keychains', 'Library/Mail', 'Library/Messages', 'Library/Application Support', 'Library/Cookies'];
+
+export const GUEST_PROMPT = [
+  '# Your own workspace',
+  "You work in this person's own part of the Mac. Your files, commands and edits stay inside it; the rest of the Mac belongs to its owner and is closed to you, so never try to look outside your folder.",
+].join('\n');
 
 export const SANDBOX_PROMPT = [
   '# Sandbox',

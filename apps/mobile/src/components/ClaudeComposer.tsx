@@ -7,7 +7,7 @@ import { ActivityIndicator, Keyboard, Pressable, ScrollView, StyleSheet, Text, T
 import { alert } from '../alert';
 import { attachmentChars, fromClipboard, MAX_ATTACHMENT_CHARS, MAX_ATTACHMENTS, pickPhotos, previewUri, type Attachment } from '../attachments';
 import { usePcClipboard } from '../pc-clipboard';
-import { effortLabel, modelLabel, parseSlash, resolveEffort, resolveModel, suggestionsFor, type CommandName, type Suggestion } from '../commands';
+import { contextLabel, effortLabel, modelLabel, parseSlash, resolveEffort, resolveModel, suggestionsFor, type CommandName, type Suggestion } from '../commands';
 import { colors, mono } from '../theme';
 
 export interface ComposerActions {
@@ -92,6 +92,25 @@ export function ClaudeComposer({
     ]);
   };
 
+  // Claude Code runs /compact itself when it arrives as a message; the chat shows a line once it is done.
+  const compact = () => {
+    Keyboard.dismiss();
+    if (running) return setNotice('Wait for the reply to finish, then compact');
+    if (actions.send('/compact', [])) tap();
+  };
+
+  const confirmCompact = () => {
+    const c = session?.context;
+    alert(
+      'Compact this chat?',
+      c ? `${Math.round(c.tokens / 1000)}k of ${Math.round(c.max / 1000)}k tokens in use. Claude keeps a summary of the conversation and frees the rest.` : 'Claude keeps a summary of the conversation and frees the rest.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        { text: 'Compact', onPress: compact },
+      ],
+    );
+  };
+
   const runCommand = (name: CommandName) => {
     setText('');
     switch (name) {
@@ -99,6 +118,8 @@ export function ClaudeComposer({
         return openPicker('/model ');
       case 'effort':
         return openPicker('/effort ');
+      case 'compact':
+        return compact();
       case 'agents':
         Keyboard.dismiss();
         return actions.agents();
@@ -201,6 +222,7 @@ export function ClaudeComposer({
       <ScrollView horizontal showsHorizontalScrollIndicator={false} keyboardShouldPersistTaps="always" style={styles.chipsScroll} contentContainerStyle={styles.chips}>
         <Chip icon="sparkles-outline" label={modelLabel(session, models)} onPress={() => openPicker('/model ')} />
         <Chip icon="bulb-outline" label={effortLabel(session)} onPress={() => openPicker('/effort ')} />
+        {contextLabel(session) ? <Chip icon="layers-outline" label={contextLabel(session)!} onPress={confirmCompact} /> : null}
         <Chip icon="pulse-outline" label="Agents" onPress={actions.agents} />
         {pc.target ? <Chip icon="clipboard-outline" label={pc.target.name} onPress={paste} /> : null}
       </ScrollView>

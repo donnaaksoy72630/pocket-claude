@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { homedir } from 'node:os';
+import { basename, isAbsolute, join } from 'node:path';
 import {
   createSdkMcpServer,
   query,
@@ -30,16 +31,17 @@ import { agentDefinitions, AUTO_ALLOWED_TOOLS, BUILTIN_TOOLS, CLAUDE_TOOLS, clau
 import type { ExecutorHandle } from './executor.js';
 import { log } from './log.js';
 import { PC_ALLOWED_TOOLS, pcTools, pcToolsPrompt, type PcHandle } from './pc-tools.js';
-import { ATTACHMENTS_DIR, chatFolder, DEFAULT_MAC_WORKSPACE, macSandbox, macWorkspaceFor, ownFolderPrompt, SANDBOX_PROMPT } from './sandbox.js';
+import { ATTACHMENTS_DIR, chatFolder, DEFAULT_MAC_WORKSPACE, GUEST_PROMPT, guestSandbox, insideRoot, macSandbox, macWorkspaceFor, ownFolderPrompt, SANDBOX_PROMPT } from './sandbox.js';
 import { readApiKey, readClaudeToken } from './api-key.js';
+import { isOrcaModel, ORCA_STAND_IN, orcaEndpoint, readOrcaKey, withOrca } from './orca.js';
 import { ensureSkillsPlugin, paths } from './store.js';
 
 export interface SessionHost {
   executorFor(sessionId: string): ExecutorHandle;
   /** The person's PocketClipboard computer for the pc_* tools. */
   pcFor(sessionId: string): PcHandle;
-  /** True for chats that run on the Mac without any file or shell access: people who are not the owner and have no tools computer. */
-  chatOnly(sessionId: string): boolean;
+  /** For an invited person's Mac chat, the only part of the Mac it may touch; undefined for the owner and remote chats. */
+  guestRoot(sessionId: string): string | undefined;
   /** Chats of the owner may bill the owner's Anthropic API key; nobody else's may. */
   ownerChat(sessionId: string): boolean;
   userName(sessionId: string): string;
@@ -101,21 +103,26 @@ function macSystemPrompt(cwd: string, projectInstructions: string | null, pcName
     .join('\n\n');
 }
 
-function chatSystemPrompt(userName: string, pcName: string | undefined): string {
-  return [
-    '# Chat without a workspace',
-    `You are talking to ${userName} from their phone or Telegram. There is no project here and you have no file or shell access anywhere: never try to read, write or run anything. Your working directory is an empty scratch folder; ignore it.`,
-    'Answer questions, write code and commands in the chat. Anything meant for pasting goes in one code block, because the user copies a block with one tap. Keep replies short and lead with the outcome, in the user\'s language.',
-    pcToolsPrompt(pcName),
-    computerToolsPrompt(pcName),
-    chatToolsPrompt(),
-  ].join('\n\n');
-}
-
 /** Built-ins that need a terminal UI or act outside the chat. */
 const MAC_DISALLOWED = ['AskUserQuestion', 'CronCreate', 'CronDelete', 'CronList', 'ScheduleWakeup', 'RemoteTrigger', 'PushNotification', 'SendUserFile', 'Workflow'];
 const MAC_AUTO_ALLOWED = ['Read', 'Glob', 'Grep', 'LS', 'NotebookRead', ...BUILTIN_TOOLS.filter((t) => t !== 'ExitPlanMode'), ...PC_ALLOWED_TOOLS, ...CHAT_ALLOWED_TOOLS];
-const CHAT_BUILTIN_TOOLS = ['WebFetch', 'WebSearch'];
+/** Claude Code's own file tools and where each keeps its path. */
+const FILE_TOOLS = new Set(['Read', 'Write', 'Edit', 'MultiEdit', 'NotebookRead', 'NotebookEdit', 'Glob', 'Grep', 'LS']);
+const PATH_KEYS = ['file_path', 'notebook_path', 'path'];
+/** For invited people the file tools are not pre-allowed: every call goes through guestFileCheck. */
+const GUEST_AUTO_ALLOWED = MAC_AUTO_ALLOWED.filter((t) => !FILE_TOOLS.has(t));
+
+/** An invited person's file tool may only touch paths inside their root; anything else is denied without asking. */
+export function guestFileCheck(toolName: string, input: Record<string, unknown>, cwd: string, root: string): string | null {
+  if (!FILE_TOOLS.has(toolName)) return null;
+  const paths = PATH_KEYS.map((k) => input[k]).filter((v): v is string => typeof v === 'string' && v.length > 0);
+  if (typeof input.pattern === 'string' && (toolName === 'Glob' || isAbsolute(input.pattern) || input.pattern.startsWith('~'))) {
+    const fixed = input.pattern.split(/[*?[{]/)[0]!;
+    if (isAbsolute(fixed) || fixed.startsWith('~') || fixed.includes('..')) paths.push(fixed.replace(/^~/, homedir()) || '/');
+  }
+  const outside = paths.find((p) => !insideRoot(p.replace(/^~(?=$|\/)/, homedir()), cwd, root));
+  return outside ? `${outside} is outside your workspace (${root}); only files there are yours.` : null;
+}
 
 const MCP_PREFIX = `mcp__${MCP_SERVER_NAME}__`;
 const IDLE_SHUTDOWN_MS = 30 * 60_000;
@@ -252,7 +259,7 @@ export class Session {
     const next: Partial<SessionMeta> = {};
     if (patch.model !== undefined) next.model = patch.model ?? undefined;
     if (patch.effort !== undefined) next.effort = patch.effort ?? undefined;
-    const billingChanged = patch.billing !== undefined && (patch.billing === 'api') !== (this.meta.billing === 'api');
+    const billingChanged = this.needsFreshProcess(patch);
     if (patch.billing !== undefined) next.billing = patch.billing === 'api' ? 'api' : undefined;
     this.setMeta(next);
     if (!this.q) return;
@@ -276,14 +283,41 @@ export class Session {
    * turn is over, so the model never changes halfway through a tool loop.
    */
   configureAfterTurn(patch: ChatPatch): void {
+    const fresh = this.needsFreshProcess(patch);
     const next: Partial<SessionMeta> = {};
     if (patch.model !== undefined) next.model = patch.model ?? undefined;
     if (patch.effort !== undefined) next.effort = patch.effort ?? undefined;
     if (patch.billing !== undefined) next.billing = patch.billing === 'api' ? 'api' : undefined;
     this.setMeta(next);
     if (!this.q) return;
+    if (fresh) {
+      if (this.meta.state === 'idle' && !this.busy) this.stop();
+      else this.restartAfterTurn = true;
+      return;
+    }
     this.pendingConfig = { ...this.pendingConfig, ...patch };
     if (this.meta.state === 'idle' && this.running.size === 0) this.applyPendingConfig();
+  }
+
+  /** How full the context window is after the turn, for the phone's chip; estimated locally, no extra API call. */
+  private refreshContext(): void {
+    const q = this.q;
+    if (!q) return;
+    Promise.resolve()
+      .then(() => q.getContextUsage({ detail: 'summary' }))
+      .then((u) => {
+        if (this.q !== q || this.destroyed) return;
+        this.setMeta({ context: { tokens: u.totalTokens, max: u.rawMaxTokens, percent: Math.round(u.percentage) } });
+      })
+      .catch((e: unknown) => log(`context usage for ${this.id} failed: ${String(e)}`));
+  }
+
+  /** Billing and the provider are fixed when Claude Code starts, so changing them needs a new process. */
+  private needsFreshProcess(patch: ChatPatch): boolean {
+    return (
+      (patch.billing !== undefined && (patch.billing === 'api') !== (this.meta.billing === 'api')) ||
+      (patch.model !== undefined && isOrcaModel(patch.model ?? undefined) !== isOrcaModel(this.meta.model))
+    );
   }
 
   private applyPendingConfig(): void {
@@ -381,7 +415,7 @@ export class Session {
    */
   private saveFiles(files: { mime: string; dataBase64: string; name?: string }[], blocks: Exclude<SDKUserMessage['message']['content'], string>): string[] {
     if (!files.length) return [];
-    const onMac = this.host.executorFor(this.id).id === undefined && !this.host.chatOnly(this.id);
+    const onMac = this.host.executorFor(this.id).id === undefined;
     const place = onMac ? macWorkspaceFor(this.meta) : undefined;
     const inbox = place?.own ? join(place.cwd, ATTACHMENTS_DIR) : join(paths.home, 'inbox', this.id);
     if (onMac) mkdirSync(inbox, { recursive: true, mode: 0o700 });
@@ -471,15 +505,18 @@ export class Session {
     const executor = this.host.executorFor(this.id);
     this.startedOn = executor.id;
     const skillsPlugin = ensureSkillsPlugin();
-    const apiKey = this.meta.billing === 'api' ? this.apiKey() : undefined;
-    const subscriptionToken = apiKey ? undefined : readClaudeToken();
+    const orca = isOrcaModel(this.meta.model) ? await this.orca() : undefined;
+    const apiKey = !orca && this.meta.billing === 'api' ? this.apiKey() : undefined;
+    const subscriptionToken = orca || apiKey ? undefined : readClaudeToken();
     const common: Partial<Options> = {
       ...this.host.claudeOptions(),
+      // OrcaRouter: Claude Code talks to the loopback endpoint in this process, which holds the real key.
+      ...(orca ? { env: { ...stringEnv(process.env, ['CLAUDE_CODE_OAUTH_TOKEN', 'ANTHROPIC_API_KEY']), ANTHROPIC_BASE_URL: orca.url, ANTHROPIC_API_KEY: orca.token } } : {}),
       // API billing: Claude Code uses the key instead of the subscription login, straight to api.anthropic.com.
       // Subscription: the long-lived token from `claude setup-token` when there is one, so no process has to refresh.
       ...(apiKey ? { env: { ...stringEnv(process.env, ['CLAUDE_CODE_OAUTH_TOKEN']), ANTHROPIC_API_KEY: apiKey } } : {}),
       ...(subscriptionToken ? { env: { ...stringEnv(process.env, ['ANTHROPIC_API_KEY']), CLAUDE_CODE_OAUTH_TOKEN: subscriptionToken } } : {}),
-      ...(this.meta.model ? { model: this.meta.model } : {}),
+      ...(orca ? { model: ORCA_STAND_IN } : this.meta.model ? { model: this.meta.model } : {}),
       ...(this.meta.effort ? { effort: this.meta.effort } : {}),
       settingSources: [],
       ...(skillsPlugin ? { plugins: [{ type: 'local' as const, path: skillsPlugin }], skills: 'all' as const } : {}),
@@ -491,31 +528,22 @@ export class Session {
     let cwd: string;
     let specific: Partial<Options>;
     const pcName = this.host.pcFor(this.id).name;
-    if (executor.id === undefined && this.host.chatOnly(this.id)) {
-      // No files anywhere: Claude talks, searches the web and reaches the person's own PocketClipboard computer.
-      cwd = join(paths.workDir, this.id);
-      mkdirSync(cwd, { recursive: true, mode: 0o700 });
-      specific = {
-        tools: CHAT_BUILTIN_TOOLS,
-        mcpServers: { [MCP_SERVER_NAME]: this.pcServer() },
-        strictMcpConfig: true,
-        allowedTools: [...CHAT_BUILTIN_TOOLS, ...PC_ALLOWED_TOOLS, ...CHAT_ALLOWED_TOOLS],
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: chatSystemPrompt(this.host.userName(this.id), pcName) },
-      };
-    } else if (executor.id === undefined) {
+    const guestRoot = executor.id === undefined ? this.host.guestRoot(this.id) : undefined;
+    if (executor.id === undefined) {
       const place = macWorkspaceFor(this.meta);
       cwd = place.cwd;
       mkdirSync(cwd, { recursive: true });
-      const sandbox = macSandbox(process.env, { autoAllow: place.own });
+      if (guestRoot) mkdirSync(guestRoot, { recursive: true, mode: 0o700 });
+      const sandbox = guestRoot ? guestSandbox(guestRoot) : macSandbox(process.env, { autoAllow: place.own });
       specific = {
         tools: { type: 'preset', preset: 'claude_code' },
         disallowedTools: MAC_DISALLOWED,
-        allowedTools: MAC_AUTO_ALLOWED,
+        allowedTools: guestRoot ? GUEST_AUTO_ALLOWED : MAC_AUTO_ALLOWED,
         mcpServers: { [MCP_SERVER_NAME]: this.pcServer() },
         ...(sandbox ? { sandbox } : {}),
         // The chat's own folder is its sandbox: edits and commands there go through; a picked project still asks.
         ...(place.own ? { permissionMode: 'acceptEdits' as const } : {}),
-        systemPrompt: { type: 'preset', preset: 'claude_code', append: macSystemPrompt(cwd, readInstructions(cwd), pcName, { own: place.own, sandboxed: !!sandbox }) },
+        systemPrompt: { type: 'preset', preset: 'claude_code', append: (guestRoot ? `${GUEST_PROMPT}\n\n` : '') + macSystemPrompt(cwd, readInstructions(cwd), pcName, { own: place.own, sandboxed: !!sandbox }) },
       };
     } else {
       const roots = executor.root ? [executor.root] : (executor.info?.workspaces ?? []);
@@ -544,7 +572,14 @@ export class Session {
 
     this.input = new InputQueue();
     this.abort = new AbortController();
-    const canUseTool: CanUseTool = (toolName, input, { signal }) => this.host.canUseTool(this.id, toolName, input, signal);
+    const canUseTool: CanUseTool = async (toolName, input, { signal }) => {
+      if (guestRoot && FILE_TOOLS.has(toolName)) {
+        // Inside their own workspace a person's files are theirs to read and edit; outside it nothing is.
+        const refused = guestFileCheck(toolName, input, cwd, guestRoot);
+        return refused ? { behavior: 'deny', message: refused } : { behavior: 'allow', updatedInput: input };
+      }
+      return this.host.canUseTool(this.id, toolName, input, signal);
+    };
     const options: Options = {
       ...common,
       ...specific,
@@ -561,6 +596,22 @@ export class Session {
   /** The pc_* and chat_* tools: what Mac and chat-only sessions get. */
   private pcServer() {
     return createSdkMcpServer({ name: MCP_SERVER_NAME, version: '0.1.0', alwaysLoad: true, tools: [...pcTools(() => this.host.pcFor(this.id)), ...computerTools(() => this.host.pcFor(this.id), this.computer), ...chatTools(() => this.chatControl())] });
+  }
+
+  /** The loopback OrcaRouter endpoint, or the subscription when there is no key or it cannot start. */
+  private async orca(): Promise<{ url: string; token: string } | undefined> {
+    if (!readOrcaKey()) {
+      log(`session ${this.id}: no OrcaRouter key, using the default model`);
+      this.setMeta({ model: undefined });
+      return undefined;
+    }
+    try {
+      return await orcaEndpoint();
+    } catch (e) {
+      log(`session ${this.id}: OrcaRouter endpoint failed (${String(e)}), using the default model`);
+      this.setMeta({ model: undefined });
+      return undefined;
+    }
   }
 
   /** The owner's key for an API-billed chat; without one (or for someone else's chat) it falls back to the subscription. */
@@ -586,7 +637,7 @@ export class Session {
       apiBlocked: () => this.apiBlocked(),
       models: async () => {
         const live = await this.supportedModels().catch(() => null);
-        return live?.length ? live : FALLBACK_MODELS;
+        return withOrca(live?.length ? live : FALLBACK_MODELS);
       },
       configure: (patch) => this.configureAfterTurn(patch),
     };
@@ -706,7 +757,12 @@ export class Session {
     switch (msg.type) {
       case 'system':
         if (msg.subtype === 'init') this.host.onClaudeVersion(msg.claude_code_version);
-        else this.trackTask(msg);
+        else if (msg.subtype === 'compact_boundary') {
+          const before = msg.compact_metadata?.pre_tokens;
+          const text = `Контекст сжат${before ? ` (было ${Math.round(before / 1000)}k токенов)` : ''}: Claude помнит главное из разговора.`;
+          this.record({ kind: 'text', text }, true);
+          this.setMeta({ lastText: text });
+        } else this.trackTask(msg);
         return;
       case 'stream_event': {
         if (msg.parent_tool_use_id) return;
@@ -772,6 +828,7 @@ export class Session {
         this.running.clear();
         this.turnStartedAt = undefined;
         this.setState('idle');
+        this.refreshContext();
         if (this.restartAfterTurn && !this.busy) {
           this.restartAfterTurn = false;
           this.stop();

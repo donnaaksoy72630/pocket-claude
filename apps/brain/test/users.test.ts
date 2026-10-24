@@ -9,12 +9,14 @@ const home = mkdtempSync(join(tmpdir(), 'pocket-users-'));
 process.env.POCKET_HOME = home;
 process.env.POCKET_LOG_DIR = join(home, 'logs');
 process.env.POCKET_NO_KEYCHAIN = '1';
+process.env.POCKET_WORKSPACE = join(home, 'workspace');
 
 const { generateIdentity, MAC_DEVICE_ID, parsePairingCode, parsePairingUri } = await import('@pocket/protocol');
 const { DeviceLink, joinAccount } = await import('@pocket/transport');
 const { startNodeRelay } = await import('../../relay/src/node-server.js');
 const { Brain } = await import('../src/daemon.js');
 const { ensureDirs, OWNER_ID } = await import('../src/store.js');
+const { personRoot } = await import('../src/sandbox.js');
 
 type Relay = Awaited<ReturnType<typeof startNodeRelay>>;
 type Link = InstanceType<typeof DeviceLink>;
@@ -135,11 +137,16 @@ describe('people', () => {
     expect(mashaCreated.payload.session.userId).toBe(mashaId);
     expect(owner.inbox.filter((m) => m.type === 'session.created').map((m) => m.type === 'session.created' && m.payload.session.title)).toEqual(['Owner chat']);
 
-    // Without a tools computer of her own, Masha's chats run in chat-only mode: never with the Mac's files.
+    // Without a tools computer of her own, Masha's chats work on the Mac, but only inside her own folder there.
     const mashaSession = mashaCreated.payload.session.sessionId;
     expect(brain.sessionMode(ownerSession)).toEqual({ mode: 'mac' });
-    expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'chat' });
-    expect((await masha.ask({ type: 'computer.select', payload: { deviceId: MAC_DEVICE_ID } }, 'error')).payload.code).toBe('not_owner');
+    expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'mac' });
+    const guestRoot = (brain as unknown as { guestRoot(id: string): string | undefined }).guestRoot;
+    expect(guestRoot.call(brain, mashaSession)).toBe(personRoot(mashaId));
+    expect(guestRoot.call(brain, ownerSession)).toBeUndefined();
+    await masha.ask({ type: 'computer.select', payload: { deviceId: MAC_DEVICE_ID, sessionId: mashaSession, project: '/Users' } }, 'computers.result');
+    expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'mac' });
+    expect((await masha.ask({ type: 'session.list', payload: {} }, 'session.list.result')).payload.sessions[0]?.project).toBeUndefined();
     expect((await masha.ask({ type: 'user.invite', payload: {} }, 'error')).payload.code).toBe('not_owner');
 
     // A computer paired with a code from Masha's phone is hers alone.
@@ -151,7 +158,7 @@ describe('people', () => {
     const mashaComputers = await masha.next('computers.result', 0, withTools);
     expect(mashaComputers.payload.computers.map((c) => c.name)).toEqual(['masha-pc']);
     expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'remote', executorId: pc.deviceId });
-    // A PocketClipboard-only laptop keeps the chat in chat-only mode but gives the pc_* tools a target.
+    // A PocketClipboard-only laptop keeps the chat where it works but gives the pc_* tools a target.
     const clipPairing = await masha.ask({ type: 'computer.pair', payload: {} }, 'computer.pairing');
     const laptop = await connect(parsePairingCode(clipPairing.payload.code), 'executor', 'masha-laptop');
     laptop.send({ type: 'executor.status', payload: { workspaces: [], os: 'win32', shell: 'none', capabilities: ['clipboard', 'screenshot'] } });

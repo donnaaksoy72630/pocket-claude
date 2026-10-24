@@ -18,7 +18,7 @@ const EFFORT_HINT: Record<Effort, string> = {
   max: 'Largest thinking budget',
 };
 
-export type CommandName = 'model' | 'effort' | 'agents' | 'paste' | 'photo' | 'new' | 'stop' | 'kill';
+export type CommandName = 'model' | 'effort' | 'compact' | 'agents' | 'paste' | 'photo' | 'new' | 'stop' | 'kill';
 
 export interface Command {
   name: CommandName;
@@ -29,6 +29,7 @@ export interface Command {
 export const COMMANDS: readonly Command[] = [
   { name: 'model', description: 'Switch the model', argHint: 'model' },
   { name: 'effort', description: 'Set how hard the model thinks', argHint: 'level' },
+  { name: 'compact', description: 'Compress the chat history to free up context' },
   { name: 'agents', description: 'Running agents and tools' },
   { name: 'paste', description: 'Attach what is on the PC clipboard' },
   { name: 'photo', description: 'Attach a photo' },
@@ -134,4 +135,10 @@ export function suggestionsFor(text: string, models: readonly ModelInfo[], sessi
   }
 
   return [];
+}
+
+/** "Context 42%" for the chip; null until the chat has answered once. */
+export function contextLabel(session: Pick<SessionMeta, 'context'> | undefined): string | null {
+  const c = session?.context;
+  return c ? `Context ${c.percent}%` : null;
 }

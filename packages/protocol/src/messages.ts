@@ -22,6 +22,8 @@ export const sessionMetaSchema = z.object({
   effort: effortSchema.optional(),
   /** Who pays for this chat: 'api' bills the owner's Anthropic API key; unset means the Claude subscription. */
   billing: z.literal('api').optional(),
+  /** How much of the context window the chat used after its last reply (tokens, window, rounded percent). */
+  context: z.object({ tokens: z.number(), max: z.number(), percent: z.number() }).optional(),
   /** The computer this chat works on; unset means the account's active computer. */
   executorId: z.string().optional(),
   /** Project folder on that computer; unset means the folders open in VS Code. */

@@ -9,7 +9,7 @@ const base = vi.hoisted(() => {
   return dir;
 });
 
-const { chatFolder, DEFAULT_MAC_WORKSPACE, listFolder, macSandbox, macWorkspaceFor, ownFolderPrompt, SANDBOX_DOMAINS } = await import('../src/sandbox.js');
+const { chatFolder, DEFAULT_MAC_WORKSPACE, listFolder, macSandbox, macWorkspaceFor, ownFolderPrompt, personRoot, SANDBOX_DOMAINS } = await import('../src/sandbox.js');
 
 const created = Date.UTC(2026, 9, 23, 9, 30);
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({ sessionId: 'abcdef12-3456', title: 't', state: 'idle', createdAt: created, updatedAt: created, ...over });
@@ -78,5 +78,41 @@ describe('Seatbelt sandbox', () => {
     expect(macSandbox({ POCKET_SANDBOX_DOMAINS: 'example.com, *.corp.local' })?.network?.allowedDomains?.slice(-2)).toEqual(['example.com', '*.corp.local']);
     expect(macSandbox({ POCKET_SANDBOX: 'off' })).toBeUndefined();
     expect(macSandbox({ POCKET_SANDBOX: '0' })).toBeUndefined();
+  });
+});
+
+describe("an invited person's workspace", () => {
+  it('lives apart from the owner and keeps file tools inside it', async () => {
+    const { guestFileCheck } = await import('../src/session.js');
+    const { mkdirSync, symlinkSync } = await import('node:fs');
+    const root = personRoot('59715990');
+    expect(root).toBe(`${base}/workspace/people/59715990`);
+    expect(chatFolder(meta({ userId: '59715990' }))).toBe(`${root}/chats/2026-10-23-abcdef12`);
+    expect(chatFolder(meta({ userId: 'owner' }))).toBe(`${base}/workspace/chats/2026-10-23-abcdef12`);
+    expect(macWorkspaceFor(meta({ userId: '59715990', project: base }))).toEqual({ cwd: `${root}/chats/2026-10-23-abcdef12`, own: true });
+
+    const cwd = join(root, 'chats', 'x');
+    mkdirSync(cwd, { recursive: true });
+    expect(guestFileCheck('Read', { file_path: 'notes.md' }, cwd, root)).toBeNull();
+    expect(guestFileCheck('Write', { file_path: join(root, 'new', 'a.txt') }, cwd, root)).toBeNull();
+    expect(guestFileCheck('Grep', { pattern: 'x' }, cwd, root)).toBeNull();
+    expect(guestFileCheck('Read', { file_path: `${base}/workspace/chats/owner.md` }, cwd, root)).toMatch(/outside your workspace/);
+    expect(guestFileCheck('Read', { file_path: '../../../../chats/a' }, cwd, root)).toMatch(/outside/);
+    expect(guestFileCheck('Read', { file_path: '~/.pocket-claude/anthropic-api-key' }, cwd, root)).toMatch(/outside/);
+    expect(guestFileCheck('Glob', { pattern: '/Users/**/*.md' }, cwd, root)).toMatch(/outside/);
+    expect(guestFileCheck('Grep', { pattern: 'key', path: '/' }, cwd, root)).toMatch(/outside/);
+    // A link inside the folder that points out of it does not open the way.
+    symlinkSync(base, join(cwd, 'escape'));
+    expect(guestFileCheck('Read', { file_path: join(cwd, 'escape', 'secret') }, cwd, root)).toMatch(/outside/);
+    expect(guestFileCheck('WebFetch', { url: 'https://example.com' }, cwd, root)).toBeNull();
+  });
+
+  it('runs commands sandboxed with no way out and the owner\'s home hidden', async () => {
+    const { guestSandbox } = await import('../src/sandbox.js');
+    const sb = guestSandbox('/tmp/p', {});
+    expect(sb).toMatchObject({ enabled: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true });
+    expect(sb?.filesystem?.allowRead).toEqual(['/tmp/p']);
+    expect(sb?.filesystem?.denyRead).toEqual(expect.arrayContaining([expect.stringMatching(/\/Documents$/), expect.stringMatching(/\/\.pocket-claude$/), expect.stringMatching(/\/\.claude$/)]));
+    expect(guestSandbox('/tmp/p', { POCKET_SANDBOX: 'off' })?.enabled).toBe(true);
   });
 });
