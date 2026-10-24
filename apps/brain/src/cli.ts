@@ -25,6 +25,8 @@ type Request =
   | { cmd: 'relay.move'; url: string }
   | { cmd: 'telegram.set'; config: { token: string; username: string } | null }
   | { cmd: 'telegram.app'; url: string | null }
+  | { cmd: 'chat.create'; user: string; title: string }
+  | { cmd: 'chat.say'; sessionId: string; text: string }
   | { cmd: 'stop' };
 
 type Response = { ok: true; data?: unknown } | { ok: false; error: string };
@@ -154,6 +156,14 @@ function handleControl(socket: Socket, brain: Brain, telegram: TelegramRunner, s
         }
         case 'allow.remove':
           return reply(brain.removeAllowRule(req.rule) ? { ok: true, data: brain.allowlist() } : { ok: false, error: 'No such rule' });
+        case 'chat.create':
+          return reply({ ok: true, data: brain.createChatFor(req.user, req.title) });
+        case 'chat.say':
+          brain.sayInChat(req.sessionId, req.text).then(
+            () => reply({ ok: true }),
+            (e: unknown) => reply({ ok: false, error: e instanceof Error ? e.message : String(e) }),
+          );
+          return;
         case 'stop':
           reply({ ok: true });
           setTimeout(shutdown, 50);
@@ -354,6 +364,19 @@ async function main(): Promise<void> {
       if (sub && sub !== 'status') throw new Error('Usage: pocket-claude api-key [status | set | remove]  (set reads the key from stdin)');
       const key = readApiKey();
       return console.log(key ? `API key ${maskApiKey(key)}` : 'No API key: pocket-claude api-key set');
+    }
+    case 'chat': {
+      // pocket-claude chat create <person> <title...>  |  pocket-claude chat say <chatId> <text...>
+      const [, sub, target, ...rest] = process.argv.slice(2);
+      if (sub === 'create' && target) {
+        const c = await call<{ sessionId: string; folder: string; user: string }>({ cmd: 'chat.create', user: target, title: rest.join(' ') });
+        return console.log(`Chat ${c.sessionId} for ${c.user}\nFolder: ${c.folder}`);
+      }
+      if (sub === 'say' && target && rest.length) {
+        await call({ cmd: 'chat.say', sessionId: target, text: rest.join(' ') });
+        return console.log('Sent.');
+      }
+      throw new Error('Usage: pocket-claude chat create <person> <title> | chat say <chatId> <text>');
     }
     case 'claude-token': {
       const sub = process.argv[3];

@@ -1,6 +1,6 @@
 import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
-import { existsSync, readdirSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, readdirSync, statSync } from 'node:fs';
 import { homedir, hostname } from 'node:os';
 import { basename, join } from 'node:path';
 import { promisify } from 'node:util';
@@ -39,7 +39,7 @@ import { WebSocket as NodeWebSocket } from 'ws';
 import { isAllowedByRules, validateRule } from './allowlist.js';
 import { FALLBACK_MODELS } from './chat-tools.js';
 import { withOrca } from './orca.js';
-import { personRoot } from './sandbox.js';
+import { macWorkspaceFor, personRoot } from './sandbox.js';
 import { COMPUTER_TOOL, computerConsent } from './computer-tools.js';
 import { toDisplayCall } from './claude-tools.js';
 import { ExecutorBridge } from './executor.js';
@@ -210,6 +210,33 @@ export class Brain {
   }
 
   /** Removes a person with all their devices and chats. The owner cannot be removed. */
+  /**
+   * A chat made on the Mac for a person (by id or name; the owner with 'owner'), with its own folder ready so files can
+   * be put in before they open it. Their phones see it at once.
+   */
+  createChatFor(idOrName: string, title: string): { sessionId: string; folder: string; user: string } {
+    const needle = idOrName.trim().toLowerCase();
+    const user = this.state.users.find((u) => u.id === needle || u.name.toLowerCase() === needle || (needle === 'owner' && u.owner));
+    if (!user) throw new Error(`No such person: ${idOrName}`);
+    const now = Date.now();
+    const meta: SessionMeta = { sessionId: randomUUID(), title: title.trim() || `Chat ${new Date(now).toLocaleString('ru-RU')}`, state: 'idle', createdAt: now, updatedAt: now, userId: user.id };
+    const session = new Session(meta, this.sessionHost(), false);
+    this.sessions.set(meta.sessionId, session);
+    const folder = macWorkspaceFor(meta).cwd;
+    mkdirSync(folder, { recursive: true, mode: 0o700 });
+    this.schedulePersist();
+    this.toClients(user.id, { type: 'session.created', payload: { session: meta } });
+    return { sessionId: meta.sessionId, folder, user: user.name };
+  }
+
+  /** Sends a message into a chat on the Mac's behalf, e.g. to have Claude read a prepared folder before the person comes. */
+  async sayInChat(sessionId: string, text: string): Promise<void> {
+    const s = this.sessions.get(sessionId);
+    if (!s) throw new Error('No such chat');
+    this.enforceLiveLimit(s.id);
+    await s.send({ text, from: MAC_DEVICE_ID });
+  }
+
   removeUser(idOrName: string): boolean {
     const needle = idOrName.trim().toLowerCase();
     const user = this.state.users.find((u) => !u.owner && (u.id === needle || u.name.toLowerCase() === needle));
