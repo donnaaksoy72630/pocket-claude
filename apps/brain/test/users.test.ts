@@ -124,7 +124,8 @@ describe('people', () => {
     expect(mashaStatus.payload.user).toEqual({ id: expect.any(String), name: 'Masha', owner: false });
     const mashaId = mashaStatus.payload.user!.id;
     expect((await owner.ask({ type: 'computers.get', payload: {} }, 'computers.result')).payload.mac).toBeDefined();
-    expect((await masha.ask({ type: 'computers.get', payload: {} }, 'computers.result')).payload.mac).toBeUndefined();
+    // She sees the Mac (her chats work in her own folder there) but none of the owner's projects on it.
+    expect((await masha.ask({ type: 'computers.get', payload: {} }, 'computers.result')).payload.mac?.projects).toEqual([]);
 
     // Chats are private.
     const created = await owner.ask({ type: 'session.create', payload: { title: 'Owner chat' } }, 'session.created');
@@ -157,6 +158,9 @@ describe('people', () => {
     const withTools = (m: { payload: { computers: { name: string; capabilities?: string[] }[] } }) => m.payload.computers.some((c) => c.capabilities?.includes('tools'));
     const mashaComputers = await masha.next('computers.result', 0, withTools);
     expect(mashaComputers.payload.computers.map((c) => c.name)).toEqual(['masha-pc']);
+    // Her chat stays on the Mac until she moves it to her computer.
+    expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'mac' });
+    await masha.ask({ type: 'computer.select', payload: { deviceId: pc.deviceId, sessionId: mashaSession } }, 'computers.result');
     expect(brain.sessionMode(mashaSession)).toEqual({ mode: 'remote', executorId: pc.deviceId });
     // A PocketClipboard-only laptop keeps the chat where it works but gives the pc_* tools a target.
     const clipPairing = await masha.ask({ type: 'computer.pair', payload: {} }, 'computer.pairing');

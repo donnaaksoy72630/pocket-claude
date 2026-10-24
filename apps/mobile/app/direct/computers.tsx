@@ -156,9 +156,12 @@ export default function ComputersScreen() {
   const hasTools = (c: Computer) => !c.capabilities || c.capabilities.includes('tools');
   const toolComputers = state.computers.filter(hasTools);
   const clipboardComputers = state.computers.filter((c) => c.capabilities?.includes('clipboard'));
-  // Only the Mac's owner may work on the Mac itself; other people's chats default to their first computer.
-  const canUseMac = state.host?.user?.owner !== false;
-  const workOn = session?.executorId && toolComputers.some((c) => c.deviceId === session.executorId) ? session.executorId : canUseMac ? MAC_DEVICE_ID : (toolComputers[0]?.deviceId ?? null);
+  // Everyone can work on the Mac: the owner anywhere, invited people in their own folder there. Older chats of invited
+  // people without a choice run on their first tools computer, as the Mac decides.
+  const owner = state.host?.user?.owner !== false;
+  const chosen = session?.executorId;
+  const workOn =
+    chosen && toolComputers.some((c) => c.deviceId === chosen) ? chosen : chosen === MAC_DEVICE_ID || owner || toolComputers.length === 0 ? MAC_DEVICE_ID : toolComputers[0]!.deviceId;
   const currentProject = session?.project ?? null;
   const sameProject = (p: Project) => currentProject !== null && currentProject.toLowerCase() === p.path.toLowerCase();
   const allMacProjects = state.mac?.projects ?? [];
@@ -217,9 +220,7 @@ export default function ComputersScreen() {
         {session ? (
           <View style={styles.projects}>
             <Text style={styles.section}>This chat works on</Text>
-            {!canUseMac && toolComputers.length === 0 ? <Text style={styles.empty}>Chats answer from the Mac. Add your computer below to let Claude see its screen and clipboard; with VS Code on it, Claude can work on its files too.</Text> : null}
-            {canUseMac ? (
-              <>
+            <>
                 <View style={[styles.row, workOn === MAC_DEVICE_ID && styles.rowOn]}>
                   <View style={styles.icon}>
                     <Ionicons name="laptop-outline" size={22} color={colors.text} />
@@ -227,12 +228,12 @@ export default function ComputersScreen() {
                   </View>
                   <View style={{ flex: 1, gap: 2 }}>
                     <Text style={styles.name}>{state.mac?.name ?? 'Mac'}</Text>
-                    <Text style={styles.meta}>Claude works here with its own tools</Text>
+                    <Text style={styles.meta}>{owner ? 'Claude works here with its own tools' : 'Your own folder on the Mac, apart from everyone else'}</Text>
                   </View>
                 </View>
                 <ProjectRow
                   project={null}
-                  defaultLabel="pocket-workspace (default)"
+                  defaultLabel={owner ? 'pocket-workspace (default)' : "This chat's own folder"}
                   current={workOn === MAC_DEVICE_ID && currentProject === null}
                   onPick={() => pickWorkspace(MAC_DEVICE_ID, null)}
                 />
@@ -244,8 +245,7 @@ export default function ComputersScreen() {
                     <Text style={styles.more}>{showAll ? 'Show fewer' : `Show all ${allMacProjects.length} projects`}</Text>
                   </Pressable>
                 ) : null}
-              </>
-            ) : null}
+            </>
 
             {toolComputers.map((c) => (
               <View key={c.deviceId} style={styles.projects}>

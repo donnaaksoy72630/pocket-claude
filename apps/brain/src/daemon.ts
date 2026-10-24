@@ -219,7 +219,15 @@ export class Brain {
     const user = this.state.users.find((u) => u.id === needle || u.name.toLowerCase() === needle || (needle === 'owner' && u.owner));
     if (!user) throw new Error(`No such person: ${idOrName}`);
     const now = Date.now();
-    const meta: SessionMeta = { sessionId: randomUUID(), title: title.trim() || `Chat ${new Date(now).toLocaleString('ru-RU')}`, state: 'idle', createdAt: now, updatedAt: now, userId: user.id };
+    const meta: SessionMeta = {
+      sessionId: randomUUID(),
+      title: title.trim() || `Chat ${new Date(now).toLocaleString('ru-RU')}`,
+      state: 'idle',
+      createdAt: now,
+      updatedAt: now,
+      userId: user.id,
+      ...(user.owner ? {} : { executorId: MAC_DEVICE_ID }),
+    };
     const session = new Session(meta, this.sessionHost(), false);
     this.sessions.set(meta.sessionId, session);
     const folder = macWorkspaceFor(meta).cwd;
@@ -455,6 +463,8 @@ export class Brain {
     const userId = s.meta.userId ?? OWNER_ID;
     const mine = this.executorDevices(userId);
     const chosen = s.meta.executorId;
+    // An invited person's chat marked for the Mac works in their own folder there, even with a tools computer of their own.
+    if (chosen === MAC_DEVICE_ID) return undefined;
     if (chosen && mine.some((d) => d.deviceId === chosen) && this.hasTools(chosen)) return chosen;
     if (this.isOwner(userId)) return undefined;
     const tools = mine.filter((d) => this.hasTools(d.deviceId)).sort((a, b) => a.pairedAt - b.pairedAt);
@@ -505,7 +515,8 @@ export class Brain {
         };
       }),
       activeId: this.defaultExecutor(userId) ?? null,
-      ...(this.isOwner(userId) ? { mac: { name: hostname().replace(/\.local$/, ''), projects: this.macProjects() } } : {}),
+      // Invited people see the Mac too (their chats work in their own folder there), never the owner's projects.
+      mac: { name: hostname().replace(/\.local$/, ''), projects: this.isOwner(userId) ? this.macProjects() : [] },
     };
   }
 
@@ -678,6 +689,8 @@ export class Brain {
           createdAt: now,
           updatedAt: now,
           userId,
+          // Invited people start on the Mac, in their own folder; they can move a chat to their own computer.
+          ...(owner ? {} : { executorId: MAC_DEVICE_ID }),
         };
         this.sessions.set(meta.sessionId, new Session(meta, this.sessionHost(), false));
         this.schedulePersist();
@@ -741,7 +754,7 @@ export class Brain {
         const { deviceId, sessionId, project } = message.payload;
         if (deviceId === MAC_DEVICE_ID) {
           // Invited people work on the Mac too, but only inside their own folder; a project elsewhere is ignored.
-          if (sessionId) mySession(sessionId)?.setExecutor(undefined, owner ? project : undefined);
+          if (sessionId) mySession(sessionId)?.setExecutor(owner ? undefined : MAC_DEVICE_ID, owner ? project : undefined);
         } else {
           if (!myComputer(deviceId)) return this.sendError(from, 'unknown_computer', 'That computer is not paired');
           if (sessionId && this.hasTools(deviceId)) mySession(sessionId)?.setExecutor(deviceId, project);
