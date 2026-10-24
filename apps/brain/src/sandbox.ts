@@ -42,9 +42,15 @@ export function chatFolder(meta: Pick<SessionMeta, 'sessionId' | 'createdAt' | '
 const OWNER = 'owner';
 const isGuest = (userId: string | undefined) => !!userId && userId !== OWNER;
 
+/**
+ * Where invited people's folders live: outside the owner's Documents on purpose, so their sandbox can hide the owner's
+ * folders without carving theirs back out (Claude Code takes a minute and more to start with such an exception).
+ */
+export const PEOPLE_WORKSPACE = process.env.POCKET_PEOPLE ?? join(homedir(), 'pocket-people');
+
 /** Everything an invited person has on the Mac: their chats' folders live under it and nothing of theirs outside. */
 export function personRoot(userId: string): string {
-  return join(DEFAULT_MAC_WORKSPACE, 'people', userId.replace(/[^\w-]/g, '_'));
+  return join(PEOPLE_WORKSPACE, userId.replace(/[^\w-]/g, '_'));
 }
 
 /** True when `path` (resolved from `cwd`, symlinks followed where they exist) is `root` or inside it. */
@@ -116,10 +122,8 @@ export function guestSandbox(root: string, env: NodeJS.ProcessEnv = process.env)
     enabled: true,
     autoAllowBashIfSandboxed: true,
     allowUnsandboxedCommands: false,
-    filesystem: {
-      denyRead: GUEST_HIDDEN.map((p) => join(home, p)),
-      allowRead: [root],
-    },
+    // The person's folder is outside every hidden path, so it needs no allowRead (which slows Claude Code's start badly).
+    filesystem: { denyRead: GUEST_HIDDEN.map((p) => join(home, p)).filter((p) => !insideRoot(root, p, p)) },
   };
 }
 

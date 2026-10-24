@@ -7,6 +7,7 @@ import { afterAll, beforeEach, describe, expect, it, vi } from 'vitest';
 const dirs = vi.hoisted(() => {
   const base = `${(process.env.TMPDIR ?? '/tmp').replace(/\/+$/, '')}/pocket-session-test-${process.pid}`;
   process.env.POCKET_HOME = `${base}/home`;
+  process.env.POCKET_LOG_DIR = `${base}/logs`;
   process.env.POCKET_WORKSPACE = `${base}/workspace`;
   process.env.POCKET_SKILLS_DIR = `${base}/no-skills`;
   return { base, home: `${base}/home`, workspace: `${base}/workspace` };

@@ -10,6 +10,7 @@ process.env.POCKET_HOME = home;
 process.env.POCKET_LOG_DIR = join(home, 'logs');
 process.env.POCKET_NO_KEYCHAIN = '1';
 process.env.POCKET_WORKSPACE = join(home, 'workspace');
+process.env.POCKET_PEOPLE = join(home, 'people');
 
 const { generateIdentity, MAC_DEVICE_ID, parsePairingCode, parsePairingUri } = await import('@pocket/protocol');
 const { DeviceLink, joinAccount } = await import('@pocket/transport');

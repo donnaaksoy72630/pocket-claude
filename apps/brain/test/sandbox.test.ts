@@ -6,10 +6,11 @@ import { afterAll, describe, expect, it, vi } from 'vitest';
 const base = vi.hoisted(() => {
   const dir = `${(process.env.TMPDIR ?? '/tmp').replace(/\/+$/, '')}/pocket-sandbox-test-${process.pid}`;
   process.env.POCKET_WORKSPACE = `${dir}/workspace`;
+  process.env.POCKET_PEOPLE = `${dir}/people`;
   return dir;
 });
 
-const { chatFolder, DEFAULT_MAC_WORKSPACE, listFolder, macSandbox, macWorkspaceFor, ownFolderPrompt, personRoot, SANDBOX_DOMAINS } = await import('../src/sandbox.js');
+const { chatFolder, DEFAULT_MAC_WORKSPACE, listFolder, macSandbox, macWorkspaceFor, ownFolderPrompt, PEOPLE_WORKSPACE: PEOPLE, personRoot, SANDBOX_DOMAINS } = await import('../src/sandbox.js');
 
 const created = Date.UTC(2026, 9, 23, 9, 30);
 const meta = (over: Partial<SessionMeta> = {}): SessionMeta => ({ sessionId: 'abcdef12-3456', title: 't', state: 'idle', createdAt: created, updatedAt: created, ...over });
@@ -86,7 +87,7 @@ describe("an invited person's workspace", () => {
     const { guestFileCheck } = await import('../src/session.js');
     const { mkdirSync, symlinkSync } = await import('node:fs');
     const root = personRoot('59715990');
-    expect(root).toBe(`${base}/workspace/people/59715990`);
+    expect(root).toBe(join(PEOPLE, '59715990'));
     expect(chatFolder(meta({ userId: '59715990' }))).toBe(`${root}/chats/2026-10-23-abcdef12`);
     expect(chatFolder(meta({ userId: 'owner' }))).toBe(`${base}/workspace/chats/2026-10-23-abcdef12`);
     expect(macWorkspaceFor(meta({ userId: '59715990', project: base }))).toEqual({ cwd: `${root}/chats/2026-10-23-abcdef12`, own: true });
@@ -111,7 +112,7 @@ describe("an invited person's workspace", () => {
     const { guestSandbox } = await import('../src/sandbox.js');
     const sb = guestSandbox('/tmp/p', {});
     expect(sb).toMatchObject({ enabled: true, allowUnsandboxedCommands: false, autoAllowBashIfSandboxed: true });
-    expect(sb?.filesystem?.allowRead).toEqual(['/tmp/p']);
+    expect(sb?.filesystem?.allowRead).toBeUndefined();
     expect(sb?.filesystem?.denyRead).toEqual(expect.arrayContaining([expect.stringMatching(/\/Documents$/), expect.stringMatching(/\/\.pocket-claude$/), expect.stringMatching(/\/\.claude$/)]));
     expect(guestSandbox('/tmp/p', { POCKET_SANDBOX: 'off' })?.enabled).toBe(true);
   });
