@@ -6,7 +6,7 @@ import { fileStore, PocketBot } from '@pocket/telegram-bot';
 import qrcode from 'qrcode-terminal';
 import { WebSocket as NodeWebSocket } from 'ws';
 import type { WebSocketCtor } from '@pocket/transport';
-import { maskApiKey, readApiKey, removeApiKey, saveApiKey } from './api-key.js';
+import { maskApiKey, readApiKey, readClaudeToken, removeApiKey, removeClaudeToken, saveApiKey, saveClaudeToken } from './api-key.js';
 import { Brain, type BrainStatus, type PairingTicket, type UserSummary } from './daemon.js';
 import { log, logToStderr } from './log.js';
 import { ensureDirs, loadOrCreateIdentity, loadState, paths, saveState } from './store.js';
@@ -354,6 +354,22 @@ async function main(): Promise<void> {
       if (sub && sub !== 'status') throw new Error('Usage: pocket-claude api-key [status | set | remove]  (set reads the key from stdin)');
       const key = readApiKey();
       return console.log(key ? `API key ${maskApiKey(key)}` : 'No API key: pocket-claude api-key set');
+    }
+    case 'claude-token': {
+      const sub = process.argv[3];
+      if (sub === 'set') {
+        ensureDirs();
+        const token = process.stdin.isTTY ? await promptHidden('Token from `claude setup-token`: ') : readFileSync(0, 'utf8');
+        saveClaudeToken(token);
+        return console.log(`Saved ${maskApiKey(token.trim())}. Restart the daemon so every chat uses it: launchctl kickstart -k gui/$(id -u)/com.pocketclaude.brain`);
+      }
+      if (sub === 'remove') {
+        removeClaudeToken();
+        return console.log('Removed. Chats go back to the login in the keychain on their next start.');
+      }
+      if (sub && sub !== 'status') throw new Error('Usage: pocket-claude claude-token [status | set | remove]  (set reads the token from stdin)');
+      const token = readClaudeToken();
+      return console.log(token ? `Subscription token ${maskApiKey(token)}` : 'No long-lived token: run `claude setup-token`, then pocket-claude claude-token set');
     }
     case 'usage':
       return printUsage(Number(arg ?? 14));

@@ -31,7 +31,7 @@ import type { ExecutorHandle } from './executor.js';
 import { log } from './log.js';
 import { PC_ALLOWED_TOOLS, pcTools, pcToolsPrompt, type PcHandle } from './pc-tools.js';
 import { ATTACHMENTS_DIR, chatFolder, DEFAULT_MAC_WORKSPACE, macSandbox, macWorkspaceFor, ownFolderPrompt, SANDBOX_PROMPT } from './sandbox.js';
-import { readApiKey } from './api-key.js';
+import { readApiKey, readClaudeToken } from './api-key.js';
 import { ensureSkillsPlugin, paths } from './store.js';
 
 export interface SessionHost {
@@ -472,10 +472,13 @@ export class Session {
     this.startedOn = executor.id;
     const skillsPlugin = ensureSkillsPlugin();
     const apiKey = this.meta.billing === 'api' ? this.apiKey() : undefined;
+    const subscriptionToken = apiKey ? undefined : readClaudeToken();
     const common: Partial<Options> = {
       ...this.host.claudeOptions(),
       // API billing: Claude Code uses the key instead of the subscription login, straight to api.anthropic.com.
-      ...(apiKey ? { env: { ...stringEnv(process.env), ANTHROPIC_API_KEY: apiKey } } : {}),
+      // Subscription: the long-lived token from `claude setup-token` when there is one, so no process has to refresh.
+      ...(apiKey ? { env: { ...stringEnv(process.env, ['CLAUDE_CODE_OAUTH_TOKEN']), ANTHROPIC_API_KEY: apiKey } } : {}),
+      ...(subscriptionToken ? { env: { ...stringEnv(process.env, ['ANTHROPIC_API_KEY']), CLAUDE_CODE_OAUTH_TOKEN: subscriptionToken } } : {}),
       ...(this.meta.model ? { model: this.meta.model } : {}),
       ...(this.meta.effort ? { effort: this.meta.effort } : {}),
       settingSources: [],
@@ -820,7 +823,7 @@ function readInstructions(dir: string): string | null {
   }
 }
 
-/** process.env without the unset entries, as Claude Code's env option wants plain strings. */
-function stringEnv(env: NodeJS.ProcessEnv): Record<string, string> {
-  return Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string'));
+/** process.env without the unset entries (and without `drop`), as Claude Code's env option wants plain strings. */
+function stringEnv(env: NodeJS.ProcessEnv, drop: string[] = []): Record<string, string> {
+  return Object.fromEntries(Object.entries(env).filter((e): e is [string, string] => typeof e[1] === 'string' && !drop.includes(e[0])));
 }
